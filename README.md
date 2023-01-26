@@ -1,6 +1,12 @@
 #Quorecs个人笔记
 大文件测速地址----------
 
+食用方法 
+wget -O /dev/null url
+
+
+
+
 leaseweb
 
 https://www.leaseweb.com/platform/network
