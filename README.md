@@ -4,7 +4,9 @@
 食用方法 
 wget -O /dev/null url
 
+ip功能
 
+bash <(curl -fsSL https://raw.githubusercontent.com/psmtnhljs/vps-test/main/ip.sh)
 
 
 leaseweb
