@@ -2,7 +2,7 @@
 大文件测速地址----------
 
 食用方法 
-wget -O /dev/null url
+wget --no-check-certificate -O /dev/null url
 
 ip功能
 
