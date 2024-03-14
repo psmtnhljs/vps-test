@@ -5,9 +5,9 @@
 wget --no-check-certificate -O /dev/null url
 
 ip功能
-
 bash <(curl -fsSL https://raw.githubusercontent.com/psmtnhljs/vps-test/main/ip.sh)
-
+印尼机器
+bash <(curl -fsSL https://raw.githubusercontent.com/psmtnhljs/vps-test/main/id-jetdino-set.sh)
 
 leaseweb
 
