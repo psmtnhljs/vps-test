@@ -1,6 +1,7 @@
 (function fairyDustCursor() {
 
-    var possibleColors = ["#D61C59", "#E7D84B", "#1B8798"]
+    var blueBubbleColor = "#1B8798"; // 蓝色气泡的颜色
+
     var width = window.innerWidth;
     var height = window.innerHeight;
     var cursor = { x: width / 2, y: width / 2 };
@@ -26,7 +27,7 @@
         cursor.x = e.clientX;
         cursor.y = e.clientY;
 
-        addParticle(cursor.x, cursor.y, possibleColors[Math.floor(Math.random() * possibleColors.length)]);
+        addParticle(cursor.x, cursor.y, blueBubbleColor); // 将蓝色传递给颜色参数
     }
 
     function addParticle(x, y, color) {
