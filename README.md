@@ -112,39 +112,3 @@ http://speedtest-ny.turnkeyinternet.net/10000mb.bin
 
 
 
-巨大文件：http://speedtest.tele2.net/
-tele2克罗地亚，萨格勒布
-http://zgb-speedtest-1.tele2.net/10GB.zip
-http://zgb-speedtest-1.tele2.net/50GB.zip
-http://zgb-speedtest-1.tele2.net/100GB.zip
-http://zgb-speedtest-1.tele2.net/1000GB.zip
-tele2德国，法兰克福
-http://fra36-speedtest-1.tele2.net/10GB.zip
-http://fra36-speedtest-1.tele2.net/50GB.zip
-http://fra36-speedtest-1.tele2.net/100GB.zip
-http://fra36-speedtest-1.tele2.net/1000GB.zip
-tele2拉脱维亚，里加
-http://bks4-speedtest-1.tele2.net/10GB.zip
-http://bks4-speedtest-1.tele2.net/50GB.zip
-http://bks4-speedtest-1.tele2.net/100GB.zip
-http://bks4-speedtest-1.tele2.net/1000GB.zip
-tele2立陶宛，维尔纽斯
-http://vln038-speedtest-1.tele2.net/10GB.zip
-http://vln038-speedtest-1.tele2.net/50GB.zip
-http://vln038-speedtest-1.tele2.net/100GB.zip
-http://vln038-speedtest-1.tele2.net/1000GB.zip
-tele2荷兰，阿姆斯特丹
-http://ams-speedtest-1.tele2.net/10GB.zip
-http://ams-speedtest-1.tele2.net/50GB.zip
-http://ams-speedtest-1.tele2.net/100GB.zip
-http://ams-speedtest-1.tele2.net/1000GB.zip
-tele2瑞典，哥德堡
-http://bck-speedtest-1.tele2.net/10GB.zip
-http://bck-speedtest-1.tele2.net/50GB.zip
-http://bck-speedtest-1.tele2.net/100GB.zip
-http://bck-speedtest-1.tele2.net/1000GB.zip
-tele2瑞典，斯德哥尔摩
-http://hgd-speedtest-1.tele2.net/10GB.zip
-http://hgd-speedtest-1.tele2.net/50GB.zip
-http://hgd-speedtest-1.tele2.net/100GB.zip
-http://hgd-speedtest-1.tele2.net/1000GB.zip
