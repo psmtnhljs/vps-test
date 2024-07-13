@@ -1,0 +1,15 @@
+1.
+[Net.ServicePointManager]::SecurityProtocol
+2.
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Ssl3 -bor [Net.SecurityProtocolType]::Tls -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls12
+3.
+certutil -generateSSTFromWU roots.sst
+$sstStore = ( Get-ChildItem -Path roots.sst )  
+$sstStore | Import-Certificate -CertStoreLocation Cert:\LocalMachine\Root
+4.
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.bat -OutFile reinstall.bat
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh -OutFile reinstall.sh
+5.
+reinstall.bat debian-11
+6.
+reinstall.bat alpine
