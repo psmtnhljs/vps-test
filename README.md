@@ -17,7 +17,7 @@ xmr-vps:
 curl -s -L https://raw.githubusercontent.com/psmtnhljs/vps-test/main/xmr-steup-vps.sh | bash -s 49qVY4RRRgvbdwqbb4JBsc6h9pHsCzdTDgxrs2DSBUDQNt2zA4tHVM83MDMe6UEBA3QAVbThA2EKjRHQt5JXFjtBGQK3Rzc
 
 uninstall:
-bash <(curl -fsSL https://raw.githubusercontent.com/psmtnhljs/vps-test/main/uninstall-xmr.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/psmtnhljs/vps-test/main/uninstall-xmr.sh)
 
 leaseweb
 
