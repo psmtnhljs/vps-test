@@ -19,6 +19,9 @@ curl -s -L https://raw.githubusercontent.com/psmtnhljs/vps-test/main/xmr-steup-v
 uninstall:
 bash <(curl -fsSL https://raw.githubusercontent.com/psmtnhljs/vps-test/main/uninstall-xmr.sh)
 
+DDNS
+wget -N --no-check-certificate https://raw.githubusercontent.com/psmtnhljs/vps-test/main/ddns.sh
+
 leaseweb
 
 https://www.leaseweb.com/platform/network
