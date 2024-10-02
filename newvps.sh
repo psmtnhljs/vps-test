@@ -3,6 +3,7 @@
 # 设置字体颜色
 YELLOW='\e[33m'
 RED='\e[31m'
+GREEN='\e[32m' 
 RESET='\e[0m'
 
 # 第一步：更新包列表
@@ -97,4 +98,4 @@ else
 fi
 
 # 输出最终完成信息
-echo -e "${YELLOW}所有步骤已完成，请继续您的后续操作${RESET}"
+echo -e "${GREEN}所有步骤已完成，请继续后续操作${RESET}"
