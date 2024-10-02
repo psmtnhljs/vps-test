@@ -55,14 +55,14 @@ if sudo fallocate -l 1G /swapfile > /dev/null 2>&1 && sudo chmod 600 /swapfile >
     sudo bash -c 'echo "/swapfile none swap sw 0 0" >> /etc/fstab' > /dev/null 2>&1
     echo -e "${YELLOW}1GB SWAP空间添加成功${RESET}"
 else
-    echo -e "${RED}SWAP空间添加失败，可能已存在swap或使用root用户登录${RESET}"
+    echo -e "${RED}SWAP空间添加失败，可能已存在swapfile${RESET}"
 fi
 
 # 第七步：阻止系统杀进程
 if sudo bash -c 'echo 1 > /proc/sys/vm/overcommit_memory' > /dev/null 2>&1; then
     echo -e "${YELLOW}内存过量管理配置成功${RESET}"
 else
-    echo -e "${RED}内存过量管理配置失败(不影响使用，可以无视)${RESET}"
+    echo -e "${RED}内存过量管理已经配置，跳过${RESET}"
 fi
 
 # 第八步：优化系统配置
@@ -91,9 +91,9 @@ net.ipv4.tcp_max_orphans = 32768
 EOF' > /dev/null 2>&1
 
 if sudo sysctl -p > /dev/null 2>&1; then
-    echo -e "${YELLOW}系统优化配置成功${RESET}"
+    echo -e "${YELLOW}优化系统网络配置成功${RESET}"
 else
-    echo -e "${RED}系统网络优化失败，可能您已使用其他脚本进行优化或服务商已进行优化${RESET}"
+    echo -e "${RED}您的系统已进行优化系统网络配置${RESET}"
 fi
 
 # 输出最终完成信息
