@@ -66,7 +66,7 @@ else
 fi
 
 # 第八步：优化系统配置
-echo -e "${YELLOW}正在优化系统配置...${RESET}"
+echo -e "${YELLOW}正在优化系统网络配置...${RESET}"
 sudo bash -c 'cat << EOF >> /etc/sysctl.conf
 net.ipv6.conf.all.autoconf = 0
 net.ipv6.conf.eth0.autoconf = 0
@@ -93,7 +93,7 @@ EOF' > /dev/null 2>&1
 if sudo sysctl -p > /dev/null 2>&1; then
     echo -e "${YELLOW}优化系统网络配置成功${RESET}"
 else
-    echo -e "${RED}您的系统已进行优化系统网络配置${RESET}"
+    echo -e "${YELLOW}已进行相关操作，跳过${RESET}"
 fi
 
 # 输出最终完成信息
