@@ -22,6 +22,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/psmtnhljs/vps-test/main/unin
 DDNS
 wget -N --no-check-certificate https://raw.githubusercontent.com/psmtnhljs/vps-test/main/ddns.sh
 
+新VPS调整
+bash <(curl -fsSL https://raw.githubusercontent.com/psmtnhljs/vps-test/main/newvps.sh)
+
 leaseweb
 
 https://www.leaseweb.com/platform/network
