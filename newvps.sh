@@ -34,14 +34,20 @@ if ip -6 addr | grep -q "inet6"; then
         echo -e "${YELLOW}临时禁用IPv6成功${RESET}"
     fi
 else
-    echo -e "${YELLOW}没有检测到IPv6，将执行下一步${RESET}"
+    echo -e "${YELLOW}没有检测到IPv6${RESET}"
 fi
 
 # 第五步：启用 BBR 加速
-if sudo bash -c 'echo -e "\n# Enable TCP BBR\nnet.core.default_qdisc = fq\nnet.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf' > /dev/null 2>&1 && sudo sysctl -p > /dev/null 2>&1; then
-    echo -e "${YELLOW}BBR加速启用成功${RESET}"
+tcp_congestion_control=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
+if [ "$tcp_congestion_control" = "bbr" ]; then
+    echo -e "${YELLOW}BBR已开启${RESET}"
 else
-    echo -e "${RED}BBR加速启用失败，请检查内核状况${RESET}"
+    echo -e "${YELLOW}正在开启BBR...${RESET}"
+    if sudo bash -c 'echo -e "\n# Enable TCP BBR\nnet.core.default_qdisc = fq\nnet.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf' > /dev/null 2>&1 && sudo sysctl -p > /dev/null 2>&1; then
+        echo -e "${YELLOW}BBR加速启用成功${RESET}"
+    else
+        echo -e "${RED}BBR加速启用失败，请使用其他脚本${RESET}"
+    fi
 fi
 
 # 第六步：添加 1GB SWAP 空间
@@ -56,7 +62,38 @@ fi
 if sudo bash -c 'echo 1 > /proc/sys/vm/overcommit_memory' > /dev/null 2>&1; then
     echo -e "${YELLOW}内存过量管理配置成功${RESET}"
 else
-    echo -e "${RED}内存过量管理配置失败，跳过此步骤${RESET}"
+    echo -e "${RED}内存过量管理配置失败(不影响使用，可以无视)${RESET}"
+fi
+
+# 第八步：优化系统配置
+echo -e "${YELLOW}正在优化系统配置...${RESET}"
+sudo bash -c 'cat << EOF >> /etc/sysctl.conf
+net.ipv6.conf.all.autoconf = 0
+net.ipv6.conf.eth0.autoconf = 0
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
+fs.file-max = 1000000
+fs.inotify.max_user_instances = 8192
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_fin_timeout = 30
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.ip_local_port_range = 1024 65000
+net.ipv4.tcp_max_syn_backlog = 16384
+net.ipv4.tcp_max_tw_buckets = 6000
+net.ipv4.route.gc_timeout = 100
+net.ipv4.tcp_syn_retries = 1
+net.ipv4.tcp_synack_retries = 1
+net.core.somaxconn = 32768
+net.core.netdev_max_backlog = 32768
+net.ipv4.tcp_timestamps = 0
+net.ipv4.tcp_max_orphans = 32768
+EOF' > /dev/null 2>&1
+
+if sudo sysctl -p > /dev/null 2>&1; then
+    echo -e "${YELLOW}系统优化配置成功${RESET}"
+else
+    echo -e "${RED}系统优化配置失败，跳过此步骤${RESET}"
 fi
 
 # 输出最终完成信息
