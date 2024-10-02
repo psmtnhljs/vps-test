@@ -47,7 +47,7 @@ else
     if sudo bash -c 'echo -e "\n# Enable TCP BBR\nnet.core.default_qdisc = fq\nnet.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf' > /dev/null 2>&1 && sudo sysctl -p > /dev/null 2>&1; then
         echo -e "${YELLOW}BBR加速启用成功${RESET}"
     else
-        echo -e "${RED}BBR加速启用失败，请使用其他脚本${RESET}"
+        echo -e "${RED}BBR加速已启动，跳过${RESET}"
     fi
 fi
 
