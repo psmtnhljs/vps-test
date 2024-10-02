@@ -28,14 +28,19 @@ else
 fi
 
 # 第四步：禁用系统的 IPv6
-if ip -6 addr | grep -q "inet6"; then
-    if sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 > /dev/null 2>&1 && \
-       sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1 > /dev/null 2>&1 && \
-       sudo sysctl -w net.ipv6.conf.lo.disable_ipv6=1 > /dev/null 2>&1; then
-        echo -e "${YELLOW}临时禁用IPv6成功${RESET}"
-    fi
+# 检查系统是否只有IPv6地址
+if ip -6 addr | grep -q "inet6" && ! ip -4 addr | grep -q "inet"; then
+    echo -e "${YELLOW}系统仅有IPv6地址，跳过IPv6禁用步骤${RESET}"
 else
-    echo -e "${YELLOW}没有检测到IPv6${RESET}"
+    if ip -6 addr | grep -q "inet6"; then
+        if sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 > /dev/null 2>&1 && \
+           sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1 > /dev/null 2>&1 && \
+           sudo sysctl -w net.ipv6.conf.lo.disable_ipv6=1 > /dev/null 2>&1; then
+            echo -e "${YELLOW}临时禁用IPv6成功${RESET}"
+        fi
+    else
+        echo -e "${YELLOW}没有检测到IPv6，执行下一步${RESET}"
+    fi
 fi
 
 # 第五步：启用 BBR 加速
