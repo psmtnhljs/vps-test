@@ -6,6 +6,9 @@ RED='\e[31m'
 GREEN='\e[32m' 
 RESET='\e[0m'
 
+#输出等待提示
+echo -e "${YELLOW}正在进行相关操作，请耐心等待完成...${RESET}"
+
 # 第一步：更新包列表
 if sudo apt update > /dev/null 2>&1; then
     echo -e "${YELLOW}包列表更新成功${RESET}"
