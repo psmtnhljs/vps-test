@@ -24,7 +24,7 @@ else
 fi
 
 # 第三步：修改 /etc/resolv.conf 文件
-if sudo bash -c 'echo "nameserver 1.1.1.1" > /etc/resolv.conf && echo "nameserver 8.8.8.8" >> /etc/resolv.conf' > /dev/null 2>&1; then
+if sudo bash -c 'echo "nameserver 1.1.1.1" > /etc/resolv.conf && echo "nameserver 8.8.8.8" && echo "nameserver 2606:4700:4700::1111" >> /etc/resolv.conf' > /dev/null 2>&1; then
     echo -e "${YELLOW}DNS服务器修改成功${RESET}"
 else
     echo -e "${RED}DNS服务器修改失败，请检测/etc/resolv.conf文件是否存在${RESET}"
@@ -39,7 +39,7 @@ else
         if sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1 > /dev/null 2>&1 && \
            sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1 > /dev/null 2>&1 && \
            sudo sysctl -w net.ipv6.conf.lo.disable_ipv6=1 > /dev/null 2>&1; then
-            echo -e "${YELLOW}临时禁用IPv6成功${RESET}"
+            echo -e "${YELLOW}临时禁用IPv6成功，reboot后即可恢复${RESET}"
         fi
     else
         echo -e "${YELLOW}没有检测到IPv6，执行下一步${RESET}"
