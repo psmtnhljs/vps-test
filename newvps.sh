@@ -9,25 +9,25 @@ RESET='\e[0m'
 #输出等待提示
 echo -e "${YELLOW}正在进行相关操作，请耐心等待完成...${RESET}"
 
-# 第一步：更新包列表
-if sudo apt update > /dev/null 2>&1; then
+# 第一步：修改 /etc/resolv.conf 文件
+if bash -c 'echo "nameserver 1.1.1.1" > /etc/resolv.conf && echo "nameserver 8.8.8.8" && echo "nameserver 2606:4700:4700::1111" >> /etc/resolv.conf' > /dev/null 2>&1; then
+    echo -e "${YELLOW}DNS服务器修改成功${RESET}"
+else
+    echo -e "${RED}DNS服务器修改失败，请检测/etc/resolv.conf文件是否存在${RESET}"
+fi
+
+# 第二步：更新包列表
+if apt update > /dev/null 2>&1; then
     echo -e "${YELLOW}包列表更新成功${RESET}"
 else
     echo -e "${RED}包列表更新失败，请检测网络状况${RESET}"
 fi
 
-# 第二步：安装 sudo, wget, curl, git, cpulimit
-if sudo apt install -y sudo wget curl git cpulimit > /dev/null 2>&1; then
+# 第三步：安装 sudo, wget, curl, git, cpulimit
+if apt install -y sudo wget curl git cpulimit > /dev/null 2>&1; then
     echo -e "${YELLOW}相关组件安装成功${RESET}"
 else
     echo -e "${RED}相关组件安装失败，请检测网络状况${RESET}"
-fi
-
-# 第三步：修改 /etc/resolv.conf 文件
-if sudo bash -c 'echo "nameserver 1.1.1.1" > /etc/resolv.conf && echo "nameserver 8.8.8.8" && echo "nameserver 2606:4700:4700::1111" >> /etc/resolv.conf' > /dev/null 2>&1; then
-    echo -e "${YELLOW}DNS服务器修改成功${RESET}"
-else
-    echo -e "${RED}DNS服务器修改失败，请检测/etc/resolv.conf文件是否存在${RESET}"
 fi
 
 # 第四步：禁用系统的 IPv6
