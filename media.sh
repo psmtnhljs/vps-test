@@ -571,6 +571,33 @@ function GameTest_Steam() {
     echo -n -e "\r Steam Currency:\t\t\t${Font_Green}${result}${Font_Suffix}\n"
 }
 
+# === 21. TikTok Region 检测 ===
+function MediaUnlockTest_Tiktok_Region() {
+    local Ftmpresult=$(curl ${CURL_DEFAULT_OPTS} --user-agent "${UA_BROWSER}" -s "https://www.tiktok.com/")
+    if [[ "$Ftmpresult" = "curl"* ]] || [ -z "$Ftmpresult" ]; then
+        echo -n -e "\r TikTok Region:\t\t\t\t${Font_Red}Failed (Network Connection)${Font_Suffix}\n"
+        return
+    fi
+    
+    local FRegion=$(echo $Ftmpresult | grep '"region":' | sed 's/.*"region"//' | cut -f2 -d'"')
+    if [ -n "$FRegion" ]; then
+        echo -n -e "\r TikTok Region:\t\t\t\t${Font_Green}${FRegion}${Font_Suffix}\n"
+        return
+    fi
+    
+    # 第二次尝试，使用gzip解压
+    local STmpresult=$(curl ${CURL_DEFAULT_OPTS} --user-agent "${UA_BROWSER}" -sL -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9" -H "Accept-Encoding: gzip" -H "Accept-Language: en" "https://www.tiktok.com" | gunzip 2>/dev/null)
+    local SRegion=$(echo $STmpresult | grep '"region":' | sed 's/.*"region"//' | cut -f2 -d'"')
+    
+    if [ -n "$SRegion" ]; then
+        echo -n -e "\r TikTok Region:\t\t\t\t${Font_Yellow}${SRegion} (Possibly IDC IP)${Font_Suffix}\n"
+        return
+    else
+        echo -n -e "\r TikTok Region:\t\t\t\t${Font_Red}Failed${Font_Suffix}\n"
+        return
+    fi
+}
+
 # === 主要检测函数集合 ===
 function run_all_tests() {
     echo "============[ Multination Region Tests ]============"
@@ -585,6 +612,7 @@ function run_all_tests() {
     MediaUnlockTest_Spotify &
     RegionTest_oneTrust &
     RegionTest_iQYI &
+    MediaUnlockTest_Tiktok_Region &
     wait
     
     # 第二批检测
@@ -634,6 +662,10 @@ function main() {
     # 设置变量
     USE_IPV6=0  # 根据需要设置
     
+    # 显示网络信息
+    echo -e " ${Font_SkyBlue}** Your Network Provider: Detecting...${Font_Suffix}"
+    echo ""
+    
     # 运行所有检测
     run_all_tests
     
@@ -641,7 +673,33 @@ function main() {
     echo "Testing completed at: $(date)"
 }
 
+# 仅运行TikTok检测的函数
+function run_tiktok_only() {
+    echo -e "${Font_SkyBlue}【TikTok Region Detection】${Font_Suffix}"
+    echo ""
+    echo -e " ** Test Time: $(date)"
+    echo ""
+    echo "******************************************"
+    echo ""
+    
+    # 设置变量
+    USE_IPV6=0
+    
+    # 运行TikTok检测
+    MediaUnlockTest_Tiktok_Region
+    
+    echo ""
+    echo "******************************************"
+    echo -e "${Font_Green}Detection Complete${Font_Suffix}"
+    echo ""
+}
+
 # 如果直接运行此脚本
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    main "$@"
+    # 检查命令行参数
+    if [[ "$1" == "--tiktok-only" ]]; then
+        run_tiktok_only
+    else
+        main "$@"
+    fi
 fi
