@@ -121,3 +121,9 @@ function Goodbye() {
     echo ""
 }
 
+clear
+ScriptTitle
+Heading
+MediaUnlockTest_Tiktok_Region
+Goodbye
+
