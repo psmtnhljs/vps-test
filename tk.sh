@@ -70,7 +70,7 @@ function MediaUnlockTest_Tiktok_Region() {
         return 
     fi 
  
-    local FRegion=$(echo $Ftmpresult | grep '"region":' | sed 's/.*"region"//' | cut -f2 -'"') 
+    local FRegion=$(echo $Ftmpresult | grep '"region":' | sed 's/.*"region"//' | cut -f2 -d'"') 
     if [ -n "$FRegion" ]; then 
         echo -n -e "\r Tiktok Region:\t\t${Font_Green}【${FRegion}】${Font_Suffix}\n" 
         return 
