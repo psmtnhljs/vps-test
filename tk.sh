@@ -121,7 +121,7 @@ function Goodbye() {
     echo ""
 }
 
-clear
+# clear
 ScriptTitle
 Heading
 MediaUnlockTest_Tiktok_Region
