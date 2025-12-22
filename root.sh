@@ -1,19 +1,53 @@
 #!/bin/bash
-set -e
+set -Eeuo pipefail
 
-green(){ echo -e "\033[32m\033[01m$1\033[0m"; }
-red(){ echo -e "\033[31m\033[01m$1\033[0m"; }
+####################################
+# 基础环境修复（非常关键）
+####################################
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+####################################
+# 输出工具
+####################################
+green(){ echo -e "\033[32m\033[01m[OK]\033[0m $1"; }
+yellow(){ echo -e "\033[33m\033[01m[WARN]\033[0m $1"; }
+red(){ echo -e "\033[31m\033[01m[ERR]\033[0m $1"; }
+
+####################################
+# root / sudo 处理
+####################################
 [[ $EUID -ne 0 ]] && SUDO=sudo || SUDO=""
 
-# 解除属性（忽略失败）
-$SUDO chattr -i -a /etc/passwd /etc/shadow 2>/dev/null || true
+####################################
+# 必要命令检测 & 安装
+####################################
+need_cmd() {
+    command -v "$1" >/dev/null 2>&1 || {
+        yellow "缺少命令 $1，正在尝试安装依赖..."
+        $SUDO apt update -y
+        $SUDO apt install -y passwd openssh-server
+    }
+}
 
-# 检查 SSH 配置文件
+need_cmd chpasswd
+need_cmd sshd || need_cmd ssh
+
+####################################
+# SSH 配置文件定位（兼容）
+####################################
 SSHD_CONFIG="/etc/ssh/sshd_config"
-[[ ! -f $SSHD_CONFIG ]] && red "未找到 sshd_config" && exit 1
+[[ ! -f $SSHD_CONFIG ]] && { red "未找到 sshd_config"; exit 1; }
 
-# 读取密码（隐藏）
+####################################
+# 备份 SSH 配置（防翻车）
+####################################
+BACKUP="${SSHD_CONFIG}.bak.$(date +%F_%H-%M-%S)"
+$SUDO cp -a "$SSHD_CONFIG" "$BACKUP"
+green "SSH 配置已备份：$BACKUP"
+
+####################################
+# 读取 root 密码
+####################################
 while true; do
     read -s -p "请输入新的 root 密码: " mima
     echo
@@ -26,32 +60,57 @@ while true; do
     break
 done
 
+####################################
 # 设置 root 密码
-echo "root:$mima" | $SUDO chpasswd || { red "设置密码失败"; exit 1; }
+####################################
+echo "root:$mima" | $SUDO chpasswd
+green "root 密码设置成功"
 
-# SSH 配置（不存在则追加，存在则替换）
+####################################
+# SSH 配置函数（幂等）
+####################################
 set_ssh_conf() {
     local key=$1 value=$2
-    if grep -qE "^#?\s*$key" "$SSHD_CONFIG"; then
-        $SUDO sed -i "s|^#\?\s*$key.*|$key $value|" "$SSHD_CONFIG"
+    if grep -qE "^[#[:space:]]*$key\b" "$SSHD_CONFIG"; then
+        $SUDO sed -i "s|^[#[:space:]]*$key.*|$key $value|" "$SSHD_CONFIG"
     else
         echo "$key $value" | $SUDO tee -a "$SSHD_CONFIG" >/dev/null
     fi
 }
 
+####################################
+# SSH 安全配置（先开后测）
+####################################
 set_ssh_conf PermitRootLogin yes
 set_ssh_conf PasswordAuthentication yes
+set_ssh_conf PubkeyAuthentication yes
+set_ssh_conf UsePAM yes
 
-# 重启 SSH 服务
+####################################
+# 配置校验（防止 sshd 起不来）
+####################################
+if ! $SUDO sshd -t; then
+    red "sshd 配置校验失败，正在回滚！"
+    $SUDO cp -a "$BACKUP" "$SSHD_CONFIG"
+    exit 1
+fi
+
+####################################
+# 重启 SSH 服务（自适应）
+####################################
 if systemctl list-unit-files | grep -q '^sshd'; then
     $SUDO systemctl restart sshd
 elif systemctl list-unit-files | grep -q '^ssh'; then
     $SUDO systemctl restart ssh
 else
-    red "无法识别 SSH 服务名，请手动重启"
+    red "无法识别 SSH 服务名"
     exit 1
 fi
 
-green "root 密码已设置"
-green "已开启 SSH root 登录与密码认证"
-green "请确保 22 端口未被防火墙阻断"
+####################################
+# 最终提示
+####################################
+green "root 密码登录已启用"
+green "SSH 服务已重启并通过校验"
+green "请确认 22 端口未被防火墙阻断"
+green "强烈建议下一步：配置密钥 + 禁用密码登录"
