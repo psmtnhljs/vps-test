@@ -1,10 +1,9 @@
 #!/bin/bash
-#
+# By Quorecs
 # SSH Authentication Configuration Script
 # Version: 4.1.0
 # Purpose: 安全配置 SSH 认证方式
 #
-# 使用: sudo bash [script.sh](http://script.sh)
 #
 set -euo pipefail
 ####################################
@@ -158,7 +157,7 @@ reload_sshd() {
     return 0  # 失败就放过，继续
 }
 ####################################
-# 读取密码（直接使用 passwd 命令）
+# 读取密码（使用 passwd 命令）
 ####################################
 set_root_password_interactive() {
     msg_info "现在将使用 passwd 命令设置 root 密码"
