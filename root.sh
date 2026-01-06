@@ -1,88 +1,117 @@
 #!/bin/bash
 #
-# SSH 仅密钥认证配置脚本（安全无交互版）
-# Version: 4.3.0 (2025-01-06 修复版)
-# 适用于 curl | bash 直接执行
+# SSH Authentication Configuration Script
+# Version: 4.1.0
+# Purpose: 安全配置 SSH 认证方式
+#
+# 使用: sudo bash [script.sh](http://script.sh)
 #
 set -euo pipefail
-
 ####################################
-# 配置常量
+# 配置
 ####################################
-readonly SCRIPT_VERSION="4.3.0"
+readonly SCRIPT_VERSION="4.1.0"
+readonly MIN_PASSWORD_LENGTH=8
 readonly SSHD_CONFIG="/etc/ssh/sshd_config"
 readonly LOG_FILE="/var/log/ssh_auth_setup.log"
 readonly KEY_DIR="/root/ssh_keys"
 readonly AUTH_KEYS_DIR="/root/.ssh"
 readonly AUTH_KEYS_FILE="${AUTH_KEYS_DIR}/authorized_keys"
-readonly TEST_TIMEOUT=120
-
-# 颜色定义
+readonly TEST_TIMEOUT=60
+# 颜色
 C_GREEN='\033[32m'
 C_YELLOW='\033[33m'
 C_RED='\033[31m'
 C_BLUE='\033[34m'
 C_RESET='\033[0m'
-
 ####################################
-# 日志与消息函数
+# 日志函数
 ####################################
-log_msg() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE" 2>&1 || true; }
-msg_ok() { echo -e "${C_GREEN}[✓]${C_RESET} $1"; log_msg "OK: $1"; }
-msg_warn() { echo -e "${C_YELLOW}[!]${C_RESET} $1"; log_msg "WARN: $1"; }
-msg_err() { echo -e "${C_RED}[✗]${C_RESET} $1"; log_msg "ERROR: $1"; }
-msg_info() { echo -e "${C_BLUE}[i]${C_RESET} $1"; log_msg "INFO: $1"; }
-
+log_msg() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE" 2>&1 || true
+}
+msg_ok() {
+    echo -e "${C_GREEN}[✓]${C_RESET} $1"
+    log_msg "OK: $1"
+}
+msg_warn() {
+    echo -e "${C_YELLOW}[!]${C_RESET} $1"
+    log_msg "WARN: $1"
+}
+msg_err() {
+    echo -e "${C_RED}[✗]${C_RESET} $1"
+    log_msg "ERROR: $1"
+}
+msg_info() {
+    echo -e "${C_BLUE}[i]${C_RESET} $1"
+}
 ####################################
 # 权限检查
 ####################################
-[[ $EUID -ne 0 ]] && { msg_err "请使用 root 权限运行此脚本"; exit 1; }
-
+if [[ $EUID -ne 0 ]]; then
+    msg_err "需要 root 权限运行此脚本"
+    echo "使用: sudo $0"
+    exit 1
+fi
 ####################################
 # 依赖检查
 ####################################
 check_dependencies() {
-    local deps=(sshd ssh-keygen systemctl)
+    local deps=(chpasswd sshd systemctl ssh-keygen)
     local missing=()
+   
     for cmd in "${deps[@]}"; do
-        command -v "$cmd" &>/dev/null || missing+=("$cmd")
+        if ! command -v "$cmd" &>/dev/null; then
+            missing+=("$cmd")
+        fi
     done
-    if ((${#missing[@]} > 0)); then
-        msg_warn "缺少命令: ${missing[*]}"
+   
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        msg_warn "缺少依赖: ${missing[*]}"
+        msg_info "正在安装..."
+       
         if command -v apt-get &>/dev/null; then
-            apt-get update -qq && apt-get install -y openssh-server putty-tools
-        elif command -v yum &>/dev/null || command -v dnf &>/dev/null; then
-            yum install -y openssh-server putty-tools || dnf install -y openssh-server putty-tools
+            apt-get update -qq
+            apt-get install -y openssh-server passwd systemd putty-tools
+        elif command -v yum &>/dev/null; then
+            yum install -y openssh-server passwd systemd putty
         else
-            msg_err "无法自动安装依赖，请手动安装 openssh-server"
+            msg_err "无法自动安装依赖，请手动安装"
             exit 1
         fi
         msg_ok "依赖安装完成"
     fi
 }
-
 ####################################
-# 备份与恢复
+# 备份配置
 ####################################
 backup_sshd_config() {
-    local backup="${SSHD_CONFIG}.bak.$(date +%Y%m%d_%H%M%S)"
-    cp -a "$SSHD_CONFIG" "$backup" || { msg_err "备份失败"; exit 1; }
-    echo "$backup"
+    local backup="${SSHD_CONFIG}.backup.$(date +%Y%m%d_%H%M%S)"
+    if cp -a "$SSHD_CONFIG" "$backup"; then
+        echo "$backup"
+    else
+        msg_err "配置备份失败"
+        exit 1
+    fi
 }
-
+####################################
+# 恢复配置
+####################################
 restore_sshd_config() {
     local backup="$1"
-    [[ -f "$backup" ]] || return
-    cp -a "$backup" "$SSHD_CONFIG"
-    msg_warn "已恢复配置 → $backup"
-    reload_sshd
+    if [[ -f "$backup" ]]; then
+        cp -a "$backup" "$SSHD_CONFIG"
+        msg_warn "已恢复配置: $backup"
+        reload_sshd
+    fi
 }
-
 ####################################
-# 修改 sshd 配置
+# 修改 SSH 配置
 ####################################
 set_sshd_option() {
-    local key="$1" value="$2"
+    local key="$1"
+    local value="$2"
+   
     if grep -qE "^[[:space:]]*${key}[[:space:]]" "$SSHD_CONFIG"; then
         sed -i "s/^[[:space:]]*${key}[[:space:]].*/${key} ${value}/" "$SSHD_CONFIG"
     elif grep -qE "^[[:space:]]*#[[:space:]]*${key}[[:space:]]" "$SSHD_CONFIG"; then
@@ -91,184 +120,421 @@ set_sshd_option() {
         echo "${key} ${value}" >> "$SSHD_CONFIG"
     fi
 }
-
 ####################################
-# 重载 SSH 服务
+# 检测并重载 SSH 服务
 ####################################
 reload_sshd() {
-    local service=$(systemctl list-unit-files | grep -E '^(ssh|sshd)\.service' | awk -F. '{print $1}' | head -1 || echo "sshd")
-    msg_info "验证并重载 SSH 服务 ($service)..."
-    if ! sshd -t >>"$LOG_FILE" 2>&1; then
-        msg_err "sshd 配置语法错误！"
+    local service=""
+   
+    # 检测服务名
+    if systemctl list-unit-files 2>/dev/null | grep -qE '^sshd\.service'; then
+        service="sshd"
+    elif systemctl list-unit-files 2>/dev/null | grep -qE '^ssh\.service'; then
+        service="ssh"
+    elif pgrep -x sshd &>/dev/null; then
+        service="sshd"
+    else
+        service="ssh"
+    fi
+   
+    msg_info "重载 SSH 服务: $service"
+   
+    # 验证配置
+    if ! sshd -t 2>&1 | tee -a "$LOG_FILE"; then
+        msg_err "SSH 配置验证失败"
         return 1
     fi
-    systemctl reload "$service" >>"$LOG_FILE" 2>&1 || true
-    sleep 2
-    systemctl is-active --quiet "$service" && msg_ok "SSH 服务重载成功" || msg_warn "服务状态异常"
+   
+    # 重载服务（不中断连接）
+    if systemctl reload "$service" 2>&1 | tee -a "$LOG_FILE"; then
+        sleep 2
+        if systemctl is-active --quiet "$service"; then
+            msg_ok "SSH 服务已重载"
+            return 0
+        fi
+    fi
+   
+    msg_warn "SSH 服务重载失败，继续执行"
+    return 0  # 失败就放过，继续
 }
-
 ####################################
-# 生成 ED25519 密钥
+# 读取密码（直接使用 passwd 命令）
 ####################################
-generate_ed25519_key() {
-    local key_base="${KEY_DIR}/id_ed25519"
-    local priv="$key_base"
-    local pub="${key_base}.pub"
-    local ppk="${key_base}.ppk"
-
-    rm -f "$priv" "$pub" "$ppk" 2>/dev/null
-    mkdir -p "$KEY_DIR" && chmod 700 "$KEY_DIR"
-
-    ssh-keygen -t ed25519 -f "$priv" -N "" -C "root@$(hostname) $(date +%Y-%m-%d)" >/dev/null 2>&1 || {
-        msg_err "ED25519 密钥生成失败"
+set_root_password_interactive() {
+    msg_info "现在将使用 passwd 命令设置 root 密码"
+    msg_info "请输入密码两次（输入时不会显示）"
+    echo ""
+   
+    if passwd root; then
+        msg_ok "root 密码设置成功"
+        return 0
+    else
+        msg_err "密码设置失败"
         return 1
-    }
-
-    chmod 600 "$priv"
-    chmod 644 "$pub"
-
+    fi
+}
+####################################
+# 生成 SSH 密钥（修复版 - 不污染输出）
+####################################
+generate_ssh_key() {
+    local key_name="ssh_key_$(date +%Y%m%d_%H%M%S)"
+    local key_path="${KEY_DIR}/${key_name}"
+   
+    # 创建密钥目录
+    mkdir -p "$KEY_DIR"
+    chmod 700 "$KEY_DIR"
+   
+    # 尝试 ED25519（静默输出）
+    if ssh-keygen -t ed25519 -f "$key_path" -N "" -C "root@$(hostname)" >/dev/null 2>&1; then
+        chmod 600 "$key_path"
+        chmod 644 "${key_path}.pub"
+        # 只输出路径，不输出任何其他信息
+        printf '%s' "$key_path"
+        return 0
+    fi
+   
+    # 降级到 RSA 4096
+    if ssh-keygen -t rsa -b 4096 -f "$key_path" -N "" -C "root@$(hostname)" >/dev/null 2>&1; then
+        chmod 600 "$key_path"
+        chmod 644 "${key_path}.pub"
+        printf '%s' "$key_path"
+        return 0
+    fi
+   
+    # 失败返回空
+    return 1
+}
+####################################
+# 导出密钥格式
+####################################
+export_key_formats() {
+    local private_key="$1"
+    local base="${private_key%.*}"
+   
+    # PEM 格式
+    cp "$private_key" "${base}.pem"
+    chmod 600 "${base}.pem"
+   
+    # PPK 格式
     if command -v puttygen &>/dev/null; then
-        puttygen "$priv" -o "$ppk" -O private >/dev/null 2>&1 && chmod 600 "$ppk"
+        if puttygen "$private_key" -o "${base}.ppk" -O private &>/dev/null; then
+            chmod 600 "${base}.ppk"
+            msg_ok "已生成 PPK 格式 (PuTTY)"
+        fi
     fi
-
-    echo "$priv"
-}
-
-####################################
-# 显示密钥信息
-####################################
-show_key_files() {
-    local priv_path="$1"
-    local base="${priv_path%/*}/id_ed25519"
-
+   
     echo ""
-    msg_ok "新密钥已生成（旧密钥已覆盖）："
-    echo " 私钥文件 : $priv_path"
-    echo " 公钥文件 : ${priv_path}.pub"
-    [[ -f "${base}.ppk" ]] && echo " PuTTY 私钥 (PPK) : ${base}.ppk"
-    echo ""
-    msg_warn "请立即将私钥安全拷贝到本地并妥善备份！"
+    msg_ok "密钥文件:"
+    echo " 私钥 (PEM): ${base}.pem"
+    [[ -f "${base}.ppk" ]] && echo " 私钥 (PPK): ${base}.ppk"
+    echo " 公钥 (PUB): ${private_key}.pub"
     echo ""
 }
-
 ####################################
-# 添加公钥到 authorized_keys
+# 配置 authorized_keys
 ####################################
 setup_authorized_keys() {
-    local pub_file="$1"
-    [[ -f "$pub_file" ]] || { msg_err "公钥文件不存在: $pub_file"; return 1; }
-
-    mkdir -p "$AUTH_KEYS_DIR" && chmod 700 "$AUTH_KEYS_DIR"
-
-    if [[ -f "$AUTH_KEYS_FILE" ]] && grep -qFx "$(cat "$pub_file")" "$AUTH_KEYS_FILE"; then
-        msg_warn "公钥已存在，无需重复添加"
+    local public_key="$1"
+   
+    mkdir -p "$AUTH_KEYS_DIR"
+    chmod 700 "$AUTH_KEYS_DIR"
+   
+    if [[ -f "$AUTH_KEYS_FILE" ]] && grep -qF "$(cat "$public_key")" "$AUTH_KEYS_FILE" 2>/dev/null; then
+        msg_warn "公钥已存在"
     else
-        cat "$pub_file" >> "$AUTH_KEYS_FILE"
-        chmod 600 "$AUTH_KEYS_FILE"
-        msg_ok "公钥已添加到 $AUTH_KEYS_FILE"
+        cat "$public_key" >> "$AUTH_KEYS_FILE"
+        msg_ok "公钥已添加到 authorized_keys"
     fi
+   
+    chmod 600 "$AUTH_KEYS_FILE"
 }
-
 ####################################
-# 获取服务器公网 IP
+# 获取服务器 IP
 ####################################
 get_server_ip() {
-    curl -s --connect-timeout 4 https://ifconfig.me 2>/dev/null ||
-    curl -s --connect-timeout 4 https://icanhazip.com 2>/dev/null ||
-    hostname -I 2>/dev/null | awk '{print $1}' ||
-    echo "unknown"
+    local ip
+    ip=$(curl -s --max-time 3 ifconfig.me 2>/dev/null || \
+         curl -s --max-time 3 icanhazip.com 2>/dev/null || \
+         hostname -I 2>/dev/null | awk '{print $1}')
+    echo "${ip:-unknown}"
 }
-
 ####################################
-# 密钥登录测试指引（无交互）
+# 密钥登录测试
 ####################################
 test_key_login() {
-    local priv_path="$1"
+    local backup="$1"
+    local key_base="$2"
     local server_ip=$(get_server_ip)
-
+   
     echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    msg_warn "重要：请在新终端手动完成密钥登录测试！"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "1. 将私钥拷贝到本地电脑："
-    echo "   scp root@${server_ip}:$priv_path ~/.ssh/id_ed25519"
+    echo "=========================================="
+    msg_warn "密钥登录测试 (${TEST_TIMEOUT}秒超时)"
+    echo "=========================================="
     echo ""
-    echo "2. 设置权限（非常重要！）："
-    echo "   chmod 600 ~/.ssh/id_ed25519"
+    echo "请在新终端执行以下步骤："
     echo ""
-    echo "3. 测试登录："
-    echo "   ssh -i ~/.ssh/id_ed25519 root@${server_ip}"
+    echo "1. 下载密钥:"
+    echo " scp root@${server_ip}:${key_base}.pem ~/.ssh/"
     echo ""
-    echo "如果登录成功，说明密钥认证已生效。"
-    echo "测试成功后，请继续执行下面命令完成最终配置（禁用密码登录）："
+    echo "2. 设置权限:"
+    echo " chmod 600 ~/.ssh/$(basename ${key_base}).pem"
     echo ""
-    msg_info "最终命令（复制粘贴即可）："
-    cat <<'EOF'
-# 禁用密码登录，仅允许密钥
-sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
-systemctl reload sshd || service ssh reload
-EOF
+    echo "3. 测试登录:"
+    echo " ssh -i ~/.ssh/$(basename ${key_base}).pem root@${server_ip}"
     echo ""
-    msg_warn "务必先测试成功再执行上面命令，否则可能导致自己无法登录！"
+    echo "4. 如果登录成功，返回此窗口输入 'yes'"
+    echo ""
+    echo "=========================================="
+    echo ""
+   
+    # 使用 nohup 脱离会话创建超时回滚
+    nohup bash -c "sleep $TEST_TIMEOUT && echo '超时！自动回滚配置...' && cp -a '$backup' '$SSHD_CONFIG' && reload_sshd" >/dev/null 2>&1 &
+    local timer_pid=$!
+   
+    # 等待确认
+    local confirm
+    read -t "$TEST_TIMEOUT" -p "确认密钥登录成功 (输入 yes): " confirm || true
+   
+    # 停止超时任务
+    kill "$timer_pid" 2>/dev/null || true
+    wait "$timer_pid" 2>/dev/null || true
+   
+    if [[ "$confirm" == "yes" || "$confirm" == "YES" ]]; then
+        msg_ok "用户确认成功"
+        return 0
+    else
+        msg_err "未确认，回滚配置"
+        restore_sshd_config "$backup"
+        return 1
+    fi
+}
+####################################
+# 模式1: 混合认证
+####################################
+mode_hybrid() {
+    echo ""
+    echo "=========================================="
+    msg_info "模式 1: 混合认证 (密钥+密码)"
+    echo "=========================================="
+    echo ""
+   
+    local backup=$(backup_sshd_config)
+    msg_ok "配置已备份"
+   
+    # 设置密码
+    echo ""
+    msg_info "步骤 1/3: 设置 root 密码"
+    if ! set_root_password_interactive; then
+        restore_sshd_config "$backup"
+        exit 1
+    fi
+   
+    # 配置 SSH
+    echo ""
+    msg_info "步骤 2/3: 配置 SSH"
+    set_sshd_option "PermitRootLogin" "yes"
+    set_sshd_option "PasswordAuthentication" "yes"
+    set_sshd_option "PubkeyAuthentication" "yes"
+    set_sshd_option "UsePAM" "yes"
+    msg_ok "SSH 配置完成"
+   
+    # 重载服务
+    echo ""
+    msg_info "步骤 3/3: 重载 SSH 服务"
+    if ! reload_sshd; then
+        restore_sshd_config "$backup"
+        exit 1
+    fi
+   
+    echo ""
+    msg_ok "混合认证模式配置完成"
+    echo ""
+    echo "当前状态:"
+    echo " ✓ 密码登录: 已启用"
+    echo " ✓ 密钥登录: 已启用"
     echo ""
 }
-
 ####################################
-# 仅密钥认证模式
+# 模式2: 仅密码
+####################################
+mode_password_only() {
+    echo ""
+    echo "=========================================="
+    msg_info "模式 2: 仅密码认证"
+    echo "=========================================="
+    echo ""
+   
+    local backup=$(backup_sshd_config)
+    msg_ok "配置已备份"
+   
+    # 设置密码
+    echo ""
+    msg_info "步骤 1/3: 设置 root 密码"
+    if ! set_root_password_interactive; then
+        restore_sshd_config "$backup"
+        exit 1
+    fi
+   
+    # 配置 SSH
+    echo ""
+    msg_info "步骤 2/3: 配置 SSH"
+    set_sshd_option "PermitRootLogin" "yes"
+    set_sshd_option "PasswordAuthentication" "yes"
+    set_sshd_option "PubkeyAuthentication" "no"
+    set_sshd_option "UsePAM" "yes"
+    msg_ok "SSH 配置完成"
+   
+    # 重载服务
+    echo ""
+    msg_info "步骤 3/3: 重载 SSH 服务"
+    if ! reload_sshd; then
+        restore_sshd_config "$backup"
+        exit 1
+    fi
+   
+    echo ""
+    msg_ok "仅密码认证模式配置完成"
+    echo ""
+    echo "当前状态:"
+    echo " ✓ 密码登录: 已启用"
+    echo " ✗ 密钥登录: 已禁用"
+    echo ""
+    msg_warn "安全提示: 密码认证相对不安全"
+    echo "建议: 使用强密码 + fail2ban"
+    echo ""
+}
+####################################
+# 模式3: 仅密钥
 ####################################
 mode_key_only() {
     echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    msg_info "模式：仅密钥认证（最安全推荐）"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
+    echo "=========================================="
+    msg_info "模式 3: 仅密钥认证 (推荐)"
+    echo "=========================================="
+    echo ""
+   
     local backup=$(backup_sshd_config)
-    msg_ok "已备份配置：$backup"
-
-    msg_info "步骤 1/5：生成 ED25519 密钥对（覆盖旧密钥）"
-    local priv_path=$(generate_ed25519_key) || { restore_sshd_config "$backup"; exit 1; }
-    show_key_files "$priv_path"
-
-    msg_info "步骤 2/5：添加公钥到 authorized_keys"
-    setup_authorized_keys "${priv_path}.pub"
-
-    msg_info "步骤 3/5：启用密钥认证（保留密码用于测试）"
+    msg_ok "配置已备份"
+   
+    # 生成密钥
+    echo ""
+    msg_info "步骤 1/5: 生成 SSH 密钥"
+    local key_path
+    key_path=$(generate_ssh_key)
+    local gen_status=$?
+   
+    if [[ $gen_status -ne 0 || -z "$key_path" || ! -f "$key_path" ]]; then
+        msg_err "密钥生成失败"
+        restore_sshd_config "$backup"
+        exit 1
+    fi
+   
+    # 导出格式
+    echo ""
+    msg_info "步骤 2/5: 导出密钥格式"
+    export_key_formats "$key_path"
+   
+    # 配置 authorized_keys
+    echo ""
+    msg_info "步骤 3/5: 配置密钥认证"
+    setup_authorized_keys "${key_path}.pub"
+   
+    # 启用密钥登录（保留密码）
+    echo ""
+    msg_info "步骤 4/5: 启用密钥登录"
     set_sshd_option "PermitRootLogin" "yes"
     set_sshd_option "PubkeyAuthentication" "yes"
-    set_sshd_option "PasswordAuthentication" "yes"
-    reload_sshd || { restore_sshd_config "$backup"; exit 1; }
-
-    msg_info "步骤 4/5：密钥登录测试（请在新终端手动验证）"
-    test_key_login "$priv_path"
-
-    msg_info "步骤 5/5：禁用密码登录，仅允许密钥"
-    set_sshd_option "PasswordAuthentication" "no"
-    set_sshd_option "PermitRootLogin" "prohibit-password"
-    reload_sshd
-
+    set_sshd_option "PasswordAuthentication" "yes" # 暂时保留
+   
+    if ! reload_sshd; then
+        restore_sshd_config "$backup"
+        exit 1
+    fi
+   
+    # 测试密钥登录
     echo ""
-    msg_ok "仅密钥认证配置完成！密码登录已永久禁用。"
-    msg_warn "请务必备份私钥 $priv_path，丢失将无法登录！"
+    msg_info "步骤 5/5: 测试密钥登录"
+    if ! test_key_login "$backup" "${key_path%.*}"; then
+        exit 1
+    fi
+   
+    # 禁用密码登录
+    echo ""
+    msg_info "禁用密码登录"
+    set_sshd_option "PasswordAuthentication" "no"
+   
+    reload_sshd  # 不检查失败
+   
+    echo ""
+    msg_ok "仅密钥认证模式配置完成"
+    echo ""
+    echo "当前状态:"
+    echo " ✗ 密码登录: 已禁用"
+    echo " ✓ 密钥登录: 已启用"
+    echo ""
+    msg_warn "重要: 请妥善保管私钥文件"
+    echo "密钥位置: ${key_path%.*}.pem"
     echo ""
 }
-
 ####################################
-# 主程序
+# 主菜单
+####################################
+show_menu() {
+    clear
+    echo ""
+    echo "=========================================="
+    echo " SSH 认证配置 v${SCRIPT_VERSION}"
+    echo "=========================================="
+    echo ""
+    echo "1) 混合认证 (密钥+密码)"
+    echo " - 同时支持密钥和密码登录"
+    echo " - 适合过渡使用"
+    echo ""
+    echo "2) 仅密码认证"
+    echo " - 只允许密码登录"
+    echo " - 快速配置"
+    echo ""
+    echo "3) 仅密钥认证 (推荐)"
+    echo " - 只允许密钥登录"
+    echo " - 最安全的方式"
+    echo " - 自动生成密钥"
+    echo " - 60秒测试保护"
+    echo ""
+    echo "0) 退出"
+    echo ""
+}
+####################################
+# 主流程
 ####################################
 main() {
+    # 检查依赖
     check_dependencies
-    [[ -f "$SSHD_CONFIG" ]] || { msg_err "未找到 $SSHD_CONFIG"; exit 1; }
-
+   
+    # 检查配置文件
+    if [[ ! -f "$SSHD_CONFIG" ]]; then
+        msg_err "找不到 SSH 配置文件"
+        exit 1
+    fi
+   
+    # 显示菜单
+    show_menu
+   
+    # 读取选择
+    local choice
+    read -p "请选择 [0-3]: " choice
+   
+    case "$choice" in
+        1) mode_hybrid ;;
+        2) mode_password_only ;;
+        3) mode_key_only ;;
+        0) echo "退出"; exit 0 ;;
+        *) msg_err "无效选项"; exit 1 ;;
+    esac
+   
     echo ""
-    msg_info "检测到非交互式执行（curl | bash），已自动跳过等待确认"
-    msg_info "请务必在新终端手动完成密钥登录测试！"
+    msg_info "日志: $LOG_FILE"
+    msg_info "配置: $SSHD_CONFIG"
     echo ""
-
-    mode_key_only
-
-    msg_info "日志文件：$LOG_FILE"
-    msg_ok "操作完成！"
+    msg_ok "完成！"
 }
-
 main "$@"
