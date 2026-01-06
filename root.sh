@@ -16,7 +16,7 @@ readonly SCRIPT_VERSION="4.0.0"
 readonly MIN_PASSWORD_LENGTH=8
 readonly SSHD_CONFIG="/etc/ssh/sshd_config"
 readonly LOG_FILE="/var/log/ssh_auth_setup.log"
-readonly KEY_DIR="/root"
+readonly KEY_DIR="/root/ssh_keys"
 readonly TEST_TIMEOUT=60
 
 # 颜色
@@ -188,29 +188,35 @@ set_root_password_interactive() {
 }
 
 ####################################
-# 生成 SSH 密钥
+# 生成 SSH 密钥（修复版 - 不污染输出）
 ####################################
 generate_ssh_key() {
     local key_name="ssh_key_$(date +%Y%m%d_%H%M%S)"
     local key_path="${KEY_DIR}/${key_name}"
     
-    msg_info "生成 SSH 密钥: $key_name" >&2
+    # 创建密钥目录
+    mkdir -p "$KEY_DIR"
+    chmod 700 "$KEY_DIR"
     
-    # 尝试 ED25519
-    if ssh-keygen -t ed25519 -f "$key_path" -N "" -C "root@$(hostname)" &>/dev/null; then
-        msg_ok "密钥生成成功 (ED25519)" >&2
-    elif ssh-keygen -t rsa -b 4096 -f "$key_path" -N "" -C "root@$(hostname)" &>/dev/null; then
-        msg_ok "密钥生成成功 (RSA 4096)" >&2
-    else
-        msg_err "密钥生成失败" >&2
-        return 1
+    # 尝试 ED25519（静默输出）
+    if ssh-keygen -t ed25519 -f "$key_path" -N "" -C "root@$(hostname)" >/dev/null 2>&1; then
+        chmod 600 "$key_path"
+        chmod 644 "${key_path}.pub"
+        # 只输出路径，不输出任何其他信息
+        printf '%s' "$key_path"
+        return 0
     fi
     
-    chmod 600 "$key_path"
-    chmod 644 "${key_path}.pub"
+    # 降级到 RSA 4096
+    if ssh-keygen -t rsa -b 4096 -f "$key_path" -N "" -C "root@$(hostname)" >/dev/null 2>&1; then
+        chmod 600 "$key_path"
+        chmod 644 "${key_path}.pub"
+        printf '%s' "$key_path"
+        return 0
+    fi
     
-    # 只输出路径到 stdout
-    echo "$key_path"
+    # 失败返回空
+    return 1
 }
 
 ####################################
