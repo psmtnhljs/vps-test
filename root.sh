@@ -194,21 +194,22 @@ generate_ssh_key() {
     local key_name="ssh_key_$(date +%Y%m%d_%H%M%S)"
     local key_path="${KEY_DIR}/${key_name}"
     
-    msg_info "生成 SSH 密钥: $key_name"
+    msg_info "生成 SSH 密钥: $key_name" >&2
     
     # 尝试 ED25519
     if ssh-keygen -t ed25519 -f "$key_path" -N "" -C "root@$(hostname)" &>/dev/null; then
-        msg_ok "密钥生成成功 (ED25519)"
+        msg_ok "密钥生成成功 (ED25519)" >&2
     elif ssh-keygen -t rsa -b 4096 -f "$key_path" -N "" -C "root@$(hostname)" &>/dev/null; then
-        msg_ok "密钥生成成功 (RSA 4096)"
+        msg_ok "密钥生成成功 (RSA 4096)" >&2
     else
-        msg_err "密钥生成失败"
+        msg_err "密钥生成失败" >&2
         return 1
     fi
     
     chmod 600 "$key_path"
     chmod 644 "${key_path}.pub"
     
+    # 只输出路径到 stdout
     echo "$key_path"
 }
 
@@ -231,10 +232,12 @@ export_key_formats() {
         fi
     fi
     
+    echo ""
     msg_ok "密钥文件:"
     echo "  私钥 (PEM): ${base}.pem"
     [[ -f "${base}.ppk" ]] && echo "  私钥 (PPK): ${base}.ppk"
     echo "  公钥 (PUB): ${private_key}.pub"
+    echo ""
 }
 
 ####################################
@@ -440,7 +443,10 @@ mode_key_only() {
     msg_info "步骤 1/5: 生成 SSH 密钥"
     local key_path
     key_path=$(generate_ssh_key)
-    if [[ -z "$key_path" ]]; then
+    local gen_status=$?
+    
+    if [[ $gen_status -ne 0 || -z "$key_path" || ! -f "$key_path" ]]; then
+        msg_err "密钥生成失败"
         restore_sshd_config "$backup"
         exit 1
     fi
@@ -492,6 +498,7 @@ mode_key_only() {
     echo "  ✓ 密钥登录: 已启用"
     echo ""
     msg_warn "重要: 请妥善保管私钥文件"
+    echo "密钥位置: ${key_path%.*}.pem"
     echo ""
 }
 
