@@ -17,7 +17,7 @@ readonly LOG_FILE="/var/log/ssh_auth_setup.log"
 readonly KEY_DIR="/root/ssh_keys"
 readonly AUTH_KEYS_DIR="/root/.ssh"
 readonly AUTH_KEYS_FILE="${AUTH_KEYS_DIR}/authorized_keys"
-readonly TEST_TIMEOUT=60
+readonly TEST_TIMEOUT=120
 # 颜色
 C_GREEN='\033[32m'
 C_YELLOW='\033[33m'
@@ -498,7 +498,7 @@ show_menu() {
     echo " - 只允许密钥登录"
     echo " - 最安全的方式"
     echo " - 自动生成密钥"
-    echo " - 60秒测试保护"
+    echo " - 120秒测试保护"
     echo ""
     echo "0) 退出"
     echo ""
