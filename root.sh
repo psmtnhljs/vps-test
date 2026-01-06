@@ -17,7 +17,7 @@ readonly MIN_PASSWORD_LENGTH=8
 readonly SSHD_CONFIG="/etc/ssh/sshd_config"
 readonly LOG_FILE="/var/log/ssh_auth_setup.log"
 readonly KEY_DIR="/root/ssh_keys"
-readonly TEST_TIMEOUT=60
+readonly TEST_TIMEOUT=120
 
 # 颜色
 C_GREEN='\033[32m'
