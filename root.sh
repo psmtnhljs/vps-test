@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# SSH 登录配置
+# SSH Authentication Configuration Script
 # Version: 3.0.0
 # Purpose: 灵活配置 SSH 认证方式（密码/密钥/混合）
 #
@@ -227,7 +227,8 @@ read_password() {
 set_root_password() {
     local password=$1
     
-    if echo "root:$password" | chpasswd 2>&1 | tee -a "$LOG_FILE"; then
+    # 使用 printf 避免特殊字符问题，并使用管道传递密码
+    if printf '%s:%s\n' "root" "$password" | chpasswd 2>&1 | tee -a "$LOG_FILE"; then
         green "root 密码设置成功"
         return 0
     else
