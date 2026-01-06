@@ -201,15 +201,21 @@ read_password() {
     local password password_confirm
     
     while true; do
-        # 使用 IFS= 防止特殊字符被解释
+        # 使用 IFS= 和 -r 防止特殊字符被解释
+        password=""
         IFS= read -r -s -p "请输入新的 root 密码 (最少${MIN_PASSWORD_LENGTH}位): " password
         echo
         
+        # 调试：检查密码是否为空
         if [[ -z "$password" ]]; then
             red "密码不能为空"
             continue
         fi
         
+        # 调试：显示密码长度（不显示密码内容）
+        blue "密码长度: ${#password} 字符"
+        
+        password_confirm=""
         IFS= read -r -s -p "请再次确认 root 密码: " password_confirm
         echo
         
@@ -219,6 +225,7 @@ read_password() {
         fi
         
         if validate_password "$password"; then
+            # 返回密码（不使用 echo，避免子 shell 问题）
             printf '%s' "$password"
             return 0
         fi
@@ -226,23 +233,42 @@ read_password() {
 }
 
 ####################################
-# 设置 root 密码
+# 设置 root 密码（增强版，多种方法）
 ####################################
 set_root_password() {
     local password="$1"
     
-    # 使用 here-string 是最安全的方法，避免管道和特殊字符问题
-    if chpasswd <<EOF
+    # 验证密码不为空
+    if [[ -z "$password" ]]; then
+        red "密码为空，无法设置"
+        return 1
+    fi
+    
+    blue "正在设置密码（长度: ${#password} 字符）..."
+    
+    # 方法1: 使用 here-document（最安全）
+    if chpasswd 2>&1 <<EOF | tee -a "$LOG_FILE"
 root:${password}
 EOF
     then
-        green "root 密码设置成功"
-        return 0
-    else
-        red "root 密码设置失败"
-        log "ERROR" "chpasswd failed for password length: ${#password}"
-        return 1
+        # 检查是否真的有错误
+        if [[ ${PIPESTATUS[0]} -eq 0 ]]; then
+            green "root 密码设置成功"
+            return 0
+        fi
     fi
+    
+    # 方法2: 使用 passwd 命令（备用）
+    yellow "尝试备用方法 (passwd)..."
+    if echo -e "${password}\n${password}" | passwd root 2>&1 | tee -a "$LOG_FILE"; then
+        if [[ ${PIPESTATUS[1]} -eq 0 ]]; then
+            green "root 密码设置成功 (使用 passwd)"
+            return 0
+        fi
+    fi
+    
+    red "root 密码设置失败"
+    return 1
 }
 
 ####################################
@@ -527,7 +553,16 @@ mode_hybrid() {
     
     # 设置密码
     yellow "步骤 1/3: 设置 root 密码"
-    local password=$(read_password)
+    local password
+    password=$(read_password)
+    local read_status=$?
+    
+    if [[ $read_status -ne 0 || -z "$password" ]]; then
+        red "密码读取失败"
+        restore_config "$backup_file"
+        exit 1
+    fi
+    
     if ! set_root_password "$password"; then
         restore_config "$backup_file"
         exit 1
@@ -581,7 +616,16 @@ mode_password_only() {
     
     # 设置密码
     yellow "步骤 1/3: 设置 root 密码"
-    local password=$(read_password)
+    local password
+    password=$(read_password)
+    local read_status=$?
+    
+    if [[ $read_status -ne 0 || -z "$password" ]]; then
+        red "密码读取失败"
+        restore_config "$backup_file"
+        exit 1
+    fi
+    
     if ! set_root_password "$password"; then
         restore_config "$backup_file"
         exit 1
