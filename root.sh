@@ -3,6 +3,9 @@
 # SSH Authentication Configuration Script
 # Version: 3.0.0
 # Purpose: 灵活配置 SSH 认证方式（密码/密钥/混合）
+# 
+# 使用方式:
+#   sudo bash ssh_auth_setup.sh
 #
 # 特性:
 # - 三种认证模式：混合/仅密码/仅密钥
@@ -198,7 +201,8 @@ read_password() {
     local password password_confirm
     
     while true; do
-        read -s -p "请输入新的 root 密码 (最少${MIN_PASSWORD_LENGTH}位): " password
+        # 使用 IFS= 防止特殊字符被解释
+        IFS= read -r -s -p "请输入新的 root 密码 (最少${MIN_PASSWORD_LENGTH}位): " password
         echo
         
         if [[ -z "$password" ]]; then
@@ -206,7 +210,7 @@ read_password() {
             continue
         fi
         
-        read -s -p "请再次确认 root 密码: " password_confirm
+        IFS= read -r -s -p "请再次确认 root 密码: " password_confirm
         echo
         
         if [[ "$password" != "$password_confirm" ]]; then
@@ -215,7 +219,7 @@ read_password() {
         fi
         
         if validate_password "$password"; then
-            echo "$password"
+            printf '%s' "$password"
             return 0
         fi
     done
@@ -225,14 +229,18 @@ read_password() {
 # 设置 root 密码
 ####################################
 set_root_password() {
-    local password=$1
+    local password="$1"
     
-    # 使用 printf 避免特殊字符问题，并使用管道传递密码
-    if printf '%s:%s\n' "root" "$password" | chpasswd 2>&1 | tee -a "$LOG_FILE"; then
+    # 使用 here-string 是最安全的方法，避免管道和特殊字符问题
+    if chpasswd <<EOF
+root:${password}
+EOF
+    then
         green "root 密码设置成功"
         return 0
     else
         red "root 密码设置失败"
+        log "ERROR" "chpasswd failed for password length: ${#password}"
         return 1
     fi
 }
@@ -701,6 +709,7 @@ mode_key_only() {
 # 显示菜单
 ####################################
 show_menu() {
+    clear
     echo ""
     echo "======================================"
     echo "  SSH 认证配置脚本 v${SCRIPT_VERSION}"
@@ -730,6 +739,29 @@ show_menu() {
 }
 
 ####################################
+# 读取菜单选项（防止误输入）
+####################################
+read_menu_choice() {
+    local choice
+    while true; do
+        read -r -p "请输入选项 [0-3]: " choice
+        # 移除前后空白和特殊字符
+        choice=$(echo "$choice" | tr -d '[:space:]')
+        
+        case $choice in
+            0|1|2|3)
+                echo "$choice"
+                return 0
+                ;;
+            *)
+                red "无效选项: $choice (请只输入数字 0-3)"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+####################################
 # 主流程
 ####################################
 main() {
@@ -742,34 +774,25 @@ main() {
     # SSH 配置检查
     check_sshd_config
     
-    # 显示菜单
-    while true; do
-        show_menu
-        read -p "请输入选项 [0-3]: " choice
-        
-        case $choice in
-            1)
-                mode_hybrid
-                break
-                ;;
-            2)
-                mode_password_only
-                break
-                ;;
-            3)
-                mode_key_only
-                break
-                ;;
-            0)
-                echo "退出脚本"
-                exit 0
-                ;;
-            *)
-                red "无效选项，请重新选择"
-                sleep 2
-                ;;
-        esac
-    done
+    # 显示菜单并读取选择
+    show_menu
+    choice=$(read_menu_choice)
+    
+    case $choice in
+        1)
+            mode_hybrid
+            ;;
+        2)
+            mode_password_only
+            ;;
+        3)
+            mode_key_only
+            ;;
+        0)
+            echo "退出脚本"
+            exit 0
+            ;;
+    esac
     
     echo ""
     blue "配置日志: $LOG_FILE"
