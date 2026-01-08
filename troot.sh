@@ -2,7 +2,7 @@
 
 # By Quorecs
 # SSH Authentication Configuration Script
-# Version: 4.2.0
+# Version: 4.3.0
 # Purpose: 安全配置 SSH 认证方式
 
 set -euo pipefail
@@ -10,7 +10,7 @@ set -euo pipefail
 ####################################
 # 配置
 ####################################
-readonly SCRIPT_VERSION="4.2.0"
+readonly SCRIPT_VERSION="4.3.0"
 readonly MIN_PASSWORD_LENGTH=8
 readonly SSHD_CONFIG="/etc/ssh/sshd_config"
 readonly LOG_FILE="/var/log/ssh_auth_setup.log"
@@ -25,6 +25,7 @@ C_GREEN='\033[32m'
 C_YELLOW='\033[33m'
 C_RED='\033[31m'
 C_BLUE='\033[34m'
+C_CYAN='\033[36m'
 C_RESET='\033[0m'
 
 ####################################
@@ -51,6 +52,10 @@ msg_err() {
 
 msg_info() {
     echo -e "${C_BLUE}[i]${C_RESET} $1"
+}
+
+msg_detect() {
+    echo -e "${C_CYAN}[→]${C_RESET} $1"
 }
 
 ####################################
@@ -90,6 +95,83 @@ check_dependencies() {
         fi
         msg_ok "依赖安装完成"
     fi
+}
+
+####################################
+# 检测当前认证方式
+####################################
+detect_current_auth_method() {
+    local has_valid_key=false
+    local has_password=false
+    
+    # 检查是否有有效的密钥
+    if [[ -f "$AUTH_KEYS_FILE" ]] && [[ -s "$AUTH_KEYS_FILE" ]]; then
+        # 检查文件是否包含有效的公钥
+        if grep -qE '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp)' "$AUTH_KEYS_FILE" 2>/dev/null; then
+            has_valid_key=true
+        fi
+    fi
+    
+    # 检查是否设置了密码（通过检查 shadow 文件）
+    if [[ -f /etc/shadow ]]; then
+        local root_shadow
+        root_shadow=$(grep "^root:" /etc/shadow 2>/dev/null || echo "")
+        # 检查密码字段不是 ! 或 * (表示已锁定)
+        if [[ -n "$root_shadow" ]] && echo "$root_shadow" | awk -F: '{print $2}' | grep -qvE '^(\*|!)'; then
+            has_password=true
+        fi
+    fi
+    
+    # 返回结果
+    if $has_valid_key && $has_password; then
+        echo "hybrid"
+    elif $has_valid_key; then
+        echo "key_only"
+    elif $has_password; then
+        echo "password_only"
+    else
+        echo "none"
+    fi
+}
+
+####################################
+# 显示当前认证状态
+####################################
+show_current_status() {
+    local auth_method=$(detect_current_auth_method)
+    
+    echo ""
+    echo "=========================================="
+    msg_detect "检测到当前认证方式"
+    echo "=========================================="
+    
+    case "$auth_method" in
+        hybrid)
+            echo " 状态: 混合认证"
+            echo " ✓ 密钥登录: 已启用"
+            echo " ✓ 密码登录: 已启用"
+            ;;
+        key_only)
+            echo " 状态: 仅密钥认证"
+            echo " ✓ 密钥登录: 已启用"
+            echo " ✗ 密码登录: 未配置"
+            ;;
+        password_only)
+            echo " 状态: 仅密码认证"
+            echo " ✗ 密钥登录: 无密钥"
+            echo " ✓ 密码登录: 已启用"
+            ;;
+        none)
+            echo " 状态: 未配置"
+            echo " ✗ 密钥登录: 无密钥"
+            echo " ✗ 密码登录: 未配置"
+            ;;
+    esac
+    
+    echo "=========================================="
+    echo ""
+    
+    echo "$auth_method"
 }
 
 ####################################
@@ -173,7 +255,7 @@ reload_sshd() {
 }
 
 ####################################
-# 禁用密钥认证（重要修复）
+# 禁用密钥认证
 ####################################
 disable_key_auth() {
     msg_info "禁用现有密钥认证"
@@ -296,6 +378,26 @@ setup_authorized_keys() {
 }
 
 ####################################
+# 添加密钥到 authorized_keys（不覆盖）
+####################################
+append_authorized_key() {
+    local public_key="$1"
+   
+    mkdir -p "$AUTH_KEYS_DIR"
+    chmod 700 "$AUTH_KEYS_DIR"
+   
+    # 检查密钥是否已存在
+    if [[ -f "$AUTH_KEYS_FILE" ]] && grep -qF "$(cat "$public_key")" "$AUTH_KEYS_FILE" 2>/dev/null; then
+        msg_warn "公钥已存在于 authorized_keys"
+    else
+        cat "$public_key" >> "$AUTH_KEYS_FILE"
+        msg_ok "公钥已添加到 authorized_keys"
+    fi
+   
+    chmod 600 "$AUTH_KEYS_FILE"
+}
+
+####################################
 # 获取服务器 IP
 ####################################
 get_server_ip() {
@@ -391,7 +493,7 @@ test_key_login() {
 }
 
 ####################################
-# 模式1: 混合认证（修复版）
+# 模式1: 混合认证（智能逻辑）
 ####################################
 mode_hybrid() {
     echo ""
@@ -399,57 +501,147 @@ mode_hybrid() {
     msg_info "模式 1: 混合认证 (密钥+密码)"
     echo "=========================================="
     echo ""
-   
+    
+    # 检测当前认证方式
+    local current_auth=$(detect_current_auth_method)
+    
     local backup=$(backup_sshd_config)
     msg_ok "配置已备份"
-   
-    # 设置密码
-    echo ""
-    msg_info "步骤 1/4: 设置 root 密码"
-    if ! set_root_password_interactive; then
-        restore_sshd_config "$backup"
-        exit 1
-    fi
-   
-    # 恢复密钥认证（如果之前被禁用）
-    echo ""
-    msg_info "步骤 2/4: 恢复密钥认证"
-    restore_key_auth
-   
-    # 配置 SSH
-    echo ""
-    msg_info "步骤 3/4: 配置 SSH"
-    set_sshd_option "PermitRootLogin" "yes"
-    set_sshd_option "PasswordAuthentication" "yes"
-    set_sshd_option "PubkeyAuthentication" "yes"
-    set_sshd_option "UsePAM" "yes"
-    msg_ok "SSH 配置完成"
-   
-    # 重载服务
-    echo ""
-    msg_info "步骤 4/4: 重载 SSH 服务"
-    if ! reload_sshd; then
-        restore_sshd_config "$backup"
-        exit 1
-    fi
-   
-    # 测试密码登录
-    echo ""
-    if ! test_password_login; then
-        msg_warn "测试失败，是否回滚配置？"
-        read -p "回滚配置? (yes/no): " rollback
-        if [[ "$rollback" == "yes" ]]; then
-            restore_sshd_config "$backup"
-            exit 1
-        fi
-    fi
-   
-    echo ""
-    msg_ok "混合认证模式配置完成"
-    echo ""
-    echo "当前状态:"
-    echo " ✓ 密码登录: 已启用"
-    echo " ✓ 密钥登录: 已启用"
+    
+    case "$current_auth" in
+        key_only)
+            # 场景: 用户使用密钥登录，需要增加密码
+            echo ""
+            msg_detect "检测到仅密钥认证，将增加密码登录"
+            echo ""
+            
+            msg_info "步骤 1/3: 设置 root 密码"
+            if ! set_root_password_interactive; then
+                restore_sshd_config "$backup"
+                exit 1
+            fi
+            
+            echo ""
+            msg_info "步骤 2/3: 配置 SSH (保留现有密钥)"
+            set_sshd_option "PermitRootLogin" "yes"
+            set_sshd_option "PasswordAuthentication" "yes"
+            set_sshd_option "PubkeyAuthentication" "yes"
+            set_sshd_option "UsePAM" "yes"
+            msg_ok "SSH 配置完成，现有密钥不会改变"
+            
+            echo ""
+            msg_info "步骤 3/3: 重载 SSH 服务"
+            if ! reload_sshd; then
+                restore_sshd_config "$backup"
+                exit 1
+            fi
+            
+            echo ""
+            if ! test_password_login; then
+                msg_warn "测试失败，是否回滚配置？"
+                read -p "回滚配置? (yes/no): " rollback
+                if [[ "$rollback" == "yes" ]]; then
+                    restore_sshd_config "$backup"
+                    exit 1
+                fi
+            fi
+            
+            echo ""
+            msg_ok "混合认证模式配置完成"
+            echo ""
+            echo "当前状态:"
+            echo " ✓ 密码登录: 已启用 (新增)"
+            echo " ✓ 密钥登录: 已启用 (保留原密钥)"
+            ;;
+            
+        password_only|none)
+            # 场景: 用户使用密码登录或无认证，需要生成密钥
+            echo ""
+            msg_detect "检测到无密钥配置，将生成新密钥"
+            echo ""
+            
+            msg_info "步骤 1/6: 设置 root 密码"
+            if ! set_root_password_interactive; then
+                restore_sshd_config "$backup"
+                exit 1
+            fi
+            
+            echo ""
+            msg_info "步骤 2/6: 生成 SSH 密钥"
+            local key_path
+            key_path=$(generate_ssh_key)
+            local gen_status=$?
+            
+            if [[ $gen_status -ne 0 || -z "$key_path" || ! -f "$key_path" ]]; then
+                msg_err "密钥生成失败"
+                restore_sshd_config "$backup"
+                exit 1
+            fi
+            
+            echo ""
+            msg_info "步骤 3/6: 导出密钥格式"
+            export_key_formats "$key_path"
+            
+            echo ""
+            msg_info "步骤 4/6: 配置密钥认证"
+            setup_authorized_keys "${key_path}.pub"
+            
+            echo ""
+            msg_info "步骤 5/6: 配置 SSH"
+            set_sshd_option "PermitRootLogin" "yes"
+            set_sshd_option "PasswordAuthentication" "yes"
+            set_sshd_option "PubkeyAuthentication" "yes"
+            set_sshd_option "UsePAM" "yes"
+            msg_ok "SSH 配置完成"
+            
+            echo ""
+            msg_info "步骤 6/6: 重载 SSH 服务"
+            if ! reload_sshd; then
+                restore_sshd_config "$backup"
+                exit 1
+            fi
+            
+            echo ""
+            msg_ok "混合认证模式配置完成"
+            echo ""
+            echo "当前状态:"
+            echo " ✓ 密码登录: 已启用"
+            echo " ✓ 密钥登录: 已启用 (新生成)"
+            echo ""
+            msg_warn "重要: 请保存新生成的密钥"
+            echo "密钥位置: ${key_path%.*}.pem"
+            ;;
+            
+        hybrid)
+            # 场景: 已经是混合认证
+            echo ""
+            msg_warn "检测到已经配置为混合认证模式"
+            echo ""
+            read -p "是否重新设置密码? (yes/no): " reset_password
+            
+            if [[ "$reset_password" == "yes" ]]; then
+                echo ""
+                msg_info "重新设置 root 密码"
+                if ! set_root_password_interactive; then
+                    restore_sshd_config "$backup"
+                    exit 1
+                fi
+                msg_ok "密码已更新"
+            fi
+            
+            # 确保配置正确
+            set_sshd_option "PermitRootLogin" "yes"
+            set_sshd_option "PasswordAuthentication" "yes"
+            set_sshd_option "PubkeyAuthentication" "yes"
+            set_sshd_option "UsePAM" "yes"
+            
+            reload_sshd
+            
+            echo ""
+            msg_ok "混合认证配置已确认"
+            ;;
+    esac
+    
     echo ""
     msg_info "提示: 客户端默认优先使用密钥认证"
     msg_info "强制使用密码: ssh -o PubkeyAuthentication=no root@server"
@@ -457,7 +649,7 @@ mode_hybrid() {
 }
 
 ####################################
-# 模式2: 仅密码（修复版）
+# 模式2: 仅密码
 ####################################
 mode_password_only() {
     echo ""
@@ -604,14 +796,18 @@ mode_key_only() {
 ####################################
 show_menu() {
     clear
+    
+    # 显示当前状态
+    local current_status=$(show_current_status)
+    
     echo ""
     echo "=========================================="
     echo " SSH 认证配置 v${SCRIPT_VERSION}"
     echo "=========================================="
     echo ""
-    echo "1) 混合认证 (密钥+密码)"
-    echo " - 同时支持密钥和密码登录"
-    echo " - 适合过渡使用"
+    echo "1) 混合认证 (密钥+密码) - 智能配置"
+    echo " • 有密钥: 增加密码登录"
+    echo " • 无密钥: 生成密钥 + 设置密码"
     echo ""
     echo "2) 仅密码认证"
     echo " - 只允许密码登录"
@@ -620,7 +816,6 @@ show_menu() {
     echo "3) 仅密钥认证 (推荐)"
     echo " - 只允许密钥登录"
     echo " - 最安全的方式"
-    echo " - 自动生成密钥"
     echo ""
     echo "0) 退出"
     echo ""
