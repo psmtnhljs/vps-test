@@ -2,7 +2,7 @@
 
 # By Quorecs
 # SSH Authentication Configuration Script
-# Version: 4.3.0
+# Version: 4.4.0
 # Purpose: 安全配置 SSH 认证方式
 
 set -euo pipefail
@@ -10,7 +10,7 @@ set -euo pipefail
 ####################################
 # 配置
 ####################################
-readonly SCRIPT_VERSION="4.3.0"
+readonly SCRIPT_VERSION="4.4.0"
 readonly MIN_PASSWORD_LENGTH=8
 readonly SSHD_CONFIG="/etc/ssh/sshd_config"
 readonly LOG_FILE="/var/log/ssh_auth_setup.log"
@@ -106,17 +106,15 @@ detect_current_auth_method() {
     
     # 检查是否有有效的密钥
     if [[ -f "$AUTH_KEYS_FILE" ]] && [[ -s "$AUTH_KEYS_FILE" ]]; then
-        # 检查文件是否包含有效的公钥
         if grep -qE '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp)' "$AUTH_KEYS_FILE" 2>/dev/null; then
             has_valid_key=true
         fi
     fi
     
-    # 检查是否设置了密码（通过检查 shadow 文件）
+    # 检查是否设置了密码
     if [[ -f /etc/shadow ]]; then
         local root_shadow
         root_shadow=$(grep "^root:" /etc/shadow 2>/dev/null || echo "")
-        # 检查密码字段不是 ! 或 * (表示已锁定)
         if [[ -n "$root_shadow" ]] && echo "$root_shadow" | awk -F: '{print $2}' | grep -qvE '^(\*|!)'; then
             has_password=true
         fi
@@ -267,7 +265,6 @@ disable_key_auth() {
         log_msg "Moved $AUTH_KEYS_FILE to $AUTH_KEYS_BACKUP"
     fi
     
-    # 确保密钥认证被禁用
     set_sshd_option "PubkeyAuthentication" "no"
 }
 
@@ -288,6 +285,25 @@ restore_key_auth() {
 }
 
 ####################################
+# 清理旧密钥
+####################################
+cleanup_old_keys() {
+    if [[ -d "$KEY_DIR" ]]; then
+        local key_count=$(find "$KEY_DIR" -type f \( -name "*.pem" -o -name "*.pub" -o -name "*.ppk" -o ! -name ".*" \) 2>/dev/null | wc -l)
+        if [[ $key_count -gt 0 ]]; then
+            msg_warn "发现 $key_count 个旧密钥文件"
+            read -p "是否删除所有旧密钥? (yes/no): " cleanup
+            if [[ "$cleanup" == "yes" ]]; then
+                rm -rf "$KEY_DIR"/*
+                msg_ok "已清理旧密钥"
+            else
+                msg_info "保留旧密钥"
+            fi
+        fi
+    fi
+}
+
+####################################
 # 读取密码（使用 passwd 命令）
 ####################################
 set_root_password_interactive() {
@@ -295,13 +311,47 @@ set_root_password_interactive() {
     msg_info "请输入密码两次（输入时不会显示）"
     echo ""
    
-    if passwd root; then
-        msg_ok "root 密码设置成功"
-        return 0
+    if passwd root 2>&1 | tee -a "$LOG_FILE"; then
+        # 验证密码是否真的设置成功
+        sleep 1
+        if grep "^root:" /etc/shadow 2>/dev/null | awk -F: '{print $2}' | grep -qvE '^(\*|!)'; then
+            msg_ok "root 密码设置成功"
+            return 0
+        else
+            msg_err "密码设置失败: 密码未生效"
+            return 1
+        fi
     else
         msg_err "密码设置失败"
         return 1
     fi
+}
+
+####################################
+# 验证密码登录是否可用
+####################################
+test_password_capability() {
+    msg_info "检测密码登录能力..."
+    
+    # 检查 PAM 配置
+    if [[ ! -f /etc/pam.d/sshd ]]; then
+        msg_warn "未找到 PAM SSH 配置文件"
+        return 1
+    fi
+    
+    # 检查 shadow 文件
+    if [[ ! -f /etc/shadow ]]; then
+        msg_warn "未找到 shadow 文件"
+        return 1
+    fi
+    
+    # 检查 passwd 命令
+    if ! command -v passwd &>/dev/null; then
+        msg_warn "passwd 命令不可用"
+        return 1
+    fi
+    
+    return 0
 }
 
 ####################################
@@ -366,32 +416,23 @@ export_key_formats() {
 ####################################
 setup_authorized_keys() {
     local public_key="$1"
+    local keep_old="${2:-false}"
    
     mkdir -p "$AUTH_KEYS_DIR"
     chmod 700 "$AUTH_KEYS_DIR"
    
-    # 清空现有内容，使用新密钥
-    cat "$public_key" > "$AUTH_KEYS_FILE"
-    msg_ok "公钥已配置到 authorized_keys"
-   
-    chmod 600 "$AUTH_KEYS_FILE"
-}
-
-####################################
-# 添加密钥到 authorized_keys（不覆盖）
-####################################
-append_authorized_key() {
-    local public_key="$1"
-   
-    mkdir -p "$AUTH_KEYS_DIR"
-    chmod 700 "$AUTH_KEYS_DIR"
-   
-    # 检查密钥是否已存在
-    if [[ -f "$AUTH_KEYS_FILE" ]] && grep -qF "$(cat "$public_key")" "$AUTH_KEYS_FILE" 2>/dev/null; then
-        msg_warn "公钥已存在于 authorized_keys"
+    if [[ "$keep_old" == "true" ]] && [[ -f "$AUTH_KEYS_FILE" ]]; then
+        # 保留旧密钥，追加新密钥
+        if grep -qF "$(cat "$public_key")" "$AUTH_KEYS_FILE" 2>/dev/null; then
+            msg_warn "公钥已存在于 authorized_keys"
+        else
+            cat "$public_key" >> "$AUTH_KEYS_FILE"
+            msg_ok "公钥已追加到 authorized_keys (保留旧密钥)"
+        fi
     else
-        cat "$public_key" >> "$AUTH_KEYS_FILE"
-        msg_ok "公钥已添加到 authorized_keys"
+        # 替换为新密钥
+        cat "$public_key" > "$AUTH_KEYS_FILE"
+        msg_ok "公钥已配置到 authorized_keys"
     fi
    
     chmod 600 "$AUTH_KEYS_FILE"
@@ -402,9 +443,18 @@ append_authorized_key() {
 ####################################
 get_server_ip() {
     local ip
-    ip=$(curl -s --max-time 3 ifconfig.me 2>/dev/null || \
-         curl -s --max-time 3 icanhazip.com 2>/dev/null || \
+    
+    # 优先获取 IPv4
+    ip=$(curl -4 -s --max-time 3 ifconfig.me 2>/dev/null || \
+         curl -4 -s --max-time 3 icanhazip.com 2>/dev/null || \
          hostname -I 2>/dev/null | awk '{print $1}')
+    
+    # 如果没有 IPv4，尝试 IPv6
+    if [[ -z "$ip" || "$ip" == "unknown" ]]; then
+        ip=$(curl -6 -s --max-time 3 ifconfig.me 2>/dev/null || \
+             curl -6 -s --max-time 3 icanhazip.com 2>/dev/null)
+    fi
+    
     echo "${ip:-unknown}"
 }
 
@@ -421,7 +471,11 @@ test_password_login() {
     echo ""
     echo "请在新终端测试密码登录："
     echo ""
-    echo " ssh root@${server_ip}"
+    if [[ "$server_ip" =~ : ]]; then
+        echo " ssh root@[$server_ip]"
+    else
+        echo " ssh root@${server_ip}"
+    fi
     echo ""
     echo "如果登录成功，返回此窗口输入 'yes'"
     echo "如果失败，输入 'no' 将回滚配置"
@@ -442,7 +496,7 @@ test_password_login() {
 }
 
 ####################################
-# 密钥登录测试
+# 密钥登录测试（新逻辑：保留密码）
 ####################################
 test_key_login() {
     local backup="$1"
@@ -451,43 +505,55 @@ test_key_login() {
    
     echo ""
     echo "=========================================="
-    msg_warn "密钥登录测试 (${TEST_TIMEOUT}秒超时)"
+    msg_warn "密钥登录测试"
     echo "=========================================="
+    echo ""
+    msg_info "重要: 密码登录将保持启用状态"
+    msg_info "这样您可以安全地测试新密钥"
     echo ""
     echo "请在新终端执行以下步骤："
     echo ""
     echo "1. 下载密钥:"
-    echo " scp root@${server_ip}:${key_base}.pem ~/.ssh/"
+    if [[ "$server_ip" =~ : ]]; then
+        echo " scp root@[${server_ip}]:${key_base}.pem ~/.ssh/"
+    else
+        echo " scp root@${server_ip}:${key_base}.pem ~/.ssh/"
+    fi
     echo ""
     echo "2. 设置权限:"
     echo " chmod 600 ~/.ssh/$(basename ${key_base}).pem"
     echo ""
     echo "3. 测试登录:"
-    echo " ssh -i ~/.ssh/$(basename ${key_base}).pem root@${server_ip}"
+    if [[ "$server_ip" =~ : ]]; then
+        echo " ssh -i ~/.ssh/$(basename ${key_base}).pem root@[$server_ip]"
+    else
+        echo " ssh -i ~/.ssh/$(basename ${key_base}).pem root@${server_ip}"
+    fi
     echo ""
     echo "4. 如果登录成功，返回此窗口输入 'yes'"
     echo ""
     echo "=========================================="
     echo ""
    
-    # 使用 nohup 脱离会话创建超时回滚
-    nohup bash -c "sleep $TEST_TIMEOUT && echo '超时！自动回滚配置...' && cp -a '$backup' '$SSHD_CONFIG' && systemctl reload sshd || systemctl reload ssh" >/dev/null 2>&1 &
-    local timer_pid=$!
-   
-    # 等待确认
     local confirm
-    read -t "$TEST_TIMEOUT" -p "确认密钥登录成功 (输入 yes): " confirm || true
-   
-    # 停止超时任务
-    kill "$timer_pid" 2>/dev/null || true
-    wait "$timer_pid" 2>/dev/null || true
+    read -p "确认密钥登录成功 (输入 yes/no): " confirm
    
     if [[ "$confirm" == "yes" || "$confirm" == "YES" ]]; then
-        msg_ok "用户确认成功"
-        return 0
+        msg_ok "密钥登录测试成功"
+        
+        # 询问是否禁用密码登录
+        echo ""
+        read -p "是否现在禁用密码登录? (yes/no): " disable_password
+        
+        if [[ "$disable_password" == "yes" ]]; then
+            return 0  # 禁用密码
+        else
+            msg_info "密码登录将保持启用状态（混合模式）"
+            return 2  # 保持混合模式
+        fi
     else
-        msg_err "未确认，回滚配置"
-        restore_sshd_config "$backup"
+        msg_err "密钥登录测试失败"
+        msg_warn "建议检查密钥是否正确下载"
         return 1
     fi
 }
@@ -514,6 +580,15 @@ mode_hybrid() {
             echo ""
             msg_detect "检测到仅密钥认证，将增加密码登录"
             echo ""
+            
+            # 检测密码登录能力
+            if ! test_password_capability; then
+                msg_err "系统不支持密码登录"
+                msg_warn "可能原因: 精简系统镜像缺少 PAM 或 shadow 支持"
+                msg_info "建议: 继续使用密钥认证"
+                restore_sshd_config "$backup"
+                exit 1
+            fi
             
             msg_info "步骤 1/3: 设置 root 密码"
             if ! set_root_password_interactive; then
@@ -560,10 +635,25 @@ mode_hybrid() {
             msg_detect "检测到无密钥配置，将生成新密钥"
             echo ""
             
-            msg_info "步骤 1/6: 设置 root 密码"
-            if ! set_root_password_interactive; then
-                restore_sshd_config "$backup"
-                exit 1
+            # 清理旧密钥
+            cleanup_old_keys
+            
+            msg_info "步骤 1/6: 确认 root 密码"
+            if [[ "$current_auth" == "none" ]]; then
+                if ! set_root_password_interactive; then
+                    restore_sshd_config "$backup"
+                    exit 1
+                fi
+            else
+                read -p "是否重新设置密码? (yes/no): " reset_pw
+                if [[ "$reset_pw" == "yes" ]]; then
+                    if ! set_root_password_interactive; then
+                        restore_sshd_config "$backup"
+                        exit 1
+                    fi
+                else
+                    msg_ok "使用现有密码"
+                fi
             fi
             
             echo ""
@@ -584,7 +674,7 @@ mode_hybrid() {
             
             echo ""
             msg_info "步骤 4/6: 配置密钥认证"
-            setup_authorized_keys "${key_path}.pub"
+            setup_authorized_keys "${key_path}.pub" "false"
             
             echo ""
             msg_info "步骤 5/6: 配置 SSH"
@@ -657,6 +747,14 @@ mode_password_only() {
     msg_info "模式 2: 仅密码认证"
     echo "=========================================="
     echo ""
+    
+    # 检测密码登录能力
+    if ! test_password_capability; then
+        msg_err "系统不支持密码登录"
+        msg_warn "可能原因: 精简系统镜像缺少 PAM 或 shadow 支持"
+        msg_info "建议: 使用密钥认证（模式 1 或 3）"
+        exit 1
+    fi
    
     local backup=$(backup_sshd_config)
     msg_ok "配置已备份"
@@ -718,7 +816,7 @@ mode_password_only() {
 }
 
 ####################################
-# 模式3: 仅密钥
+# 模式3: 仅密钥（修复死循环）
 ####################################
 mode_key_only() {
     echo ""
@@ -729,6 +827,9 @@ mode_key_only() {
    
     local backup=$(backup_sshd_config)
     msg_ok "配置已备份"
+    
+    # 清理旧密钥
+    cleanup_old_keys
    
     # 生成密钥
     echo ""
@@ -748,14 +849,14 @@ mode_key_only() {
     msg_info "步骤 2/5: 导出密钥格式"
     export_key_formats "$key_path"
    
-    # 配置 authorized_keys
+    # 配置 authorized_keys（追加，保留旧密钥）
     echo ""
     msg_info "步骤 3/5: 配置密钥认证"
-    setup_authorized_keys "${key_path}.pub"
+    setup_authorized_keys "${key_path}.pub" "true"
    
-    # 启用密钥登录（保留密码）
+    # 启用密钥登录（保留密码以便测试）
     echo ""
-    msg_info "步骤 4/5: 启用密钥登录"
+    msg_info "步骤 4/5: 启用密钥登录（暂时保留密码）"
     set_sshd_option "PermitRootLogin" "yes"
     set_sshd_option "PubkeyAuthentication" "yes"
     set_sshd_option "PasswordAuthentication" "yes"
@@ -768,23 +869,37 @@ mode_key_only() {
     # 测试密钥登录
     echo ""
     msg_info "步骤 5/5: 测试密钥登录"
-    if ! test_key_login "$backup" "${key_path%.*}"; then
+    local test_result
+    test_key_login "$backup" "${key_path%.*}"
+    test_result=$?
+    
+    if [[ $test_result -eq 1 ]]; then
+        # 测试失败，回滚
+        msg_err "密钥测试失败，已回滚配置"
         exit 1
+    elif [[ $test_result -eq 0 ]]; then
+        # 用户确认禁用密码
+        echo ""
+        msg_info "禁用密码登录"
+        set_sshd_option "PasswordAuthentication" "no"
+        reload_sshd
+        
+        echo ""
+        msg_ok "仅密钥认证模式配置完成"
+        echo ""
+        echo "当前状态:"
+        echo " ✗ 密码登录: 已禁用"
+        echo " ✓ 密钥登录: 已启用"
+    else
+        # test_result == 2，保持混合模式
+        echo ""
+        msg_ok "混合认证模式已启用"
+        echo ""
+        echo "当前状态:"
+        echo " ✓ 密码登录: 已启用"
+        echo " ✓ 密钥登录: 已启用"
     fi
    
-    # 禁用密码登录
-    echo ""
-    msg_info "禁用密码登录"
-    set_sshd_option "PasswordAuthentication" "no"
-   
-    reload_sshd
-   
-    echo ""
-    msg_ok "仅密钥认证模式配置完成"
-    echo ""
-    echo "当前状态:"
-    echo " ✗ 密码登录: 已禁用"
-    echo " ✓ 密钥登录: 已启用"
     echo ""
     msg_warn "重要: 请妥善保管私钥文件"
     echo "密钥位置: ${key_path%.*}.pem"
