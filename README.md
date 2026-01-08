@@ -1,5 +1,7 @@
 #Quorecs个人笔记
-大文件测速地址----------
+服务器配置密码/密钥/混合登录
+
+bash <(curl -sSL https://raw.githubusercontent.com/psmtnhljs/vps-test/main/troot.sh)
 
 食用方法 
 
