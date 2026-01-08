@@ -2,17 +2,22 @@
 
 # By Quorecs
 # SSH Authentication Configuration Script
-# Version: 4.4.0
-# Purpose: 安全配置 SSH 认证方式
+# Version: 4.5.1 (Fixed)
+# Purpose: 安全配置 SSH 认证方式（支持 cloud-init 系统）
+# Fixes: 修复密码登录不生效、配置冲突、交互式认证缺失问题
 
 set -euo pipefail
 
 ####################################
 # 配置
 ####################################
-readonly SCRIPT_VERSION="4.4.0"
+readonly SCRIPT_VERSION="4.5.1"
 readonly MIN_PASSWORD_LENGTH=8
 readonly SSHD_CONFIG="/etc/ssh/sshd_config"
+readonly SSHD_CONFIG_DIR="/etc/ssh/sshd_config.d"
+readonly CLOUD_INIT_SSH_CONFIG="${SSHD_CONFIG_DIR}/50-cloud-init.conf"
+readonly CLOUD_INIT_CFG_DIR="/etc/cloud/cloud.cfg.d"
+readonly CLOUD_INIT_DISABLE_FILE="${CLOUD_INIT_CFG_DIR}/99-disable-ssh-auth.cfg"
 readonly LOG_FILE="/var/log/ssh_auth_setup.log"
 readonly KEY_DIR="/root/ssh_keys"
 readonly AUTH_KEYS_DIR="/root/.ssh"
@@ -26,6 +31,7 @@ C_YELLOW='\033[33m'
 C_RED='\033[31m'
 C_BLUE='\033[34m'
 C_CYAN='\033[36m'
+C_MAGENTA='\033[35m'
 C_RESET='\033[0m'
 
 ####################################
@@ -56,6 +62,10 @@ msg_info() {
 
 msg_detect() {
     echo -e "${C_CYAN}[→]${C_RESET} $1"
+}
+
+msg_cloud() {
+    echo -e "${C_MAGENTA}[☁]${C_RESET} $1"
 }
 
 ####################################
@@ -98,6 +108,172 @@ check_dependencies() {
 }
 
 ####################################
+# 检测 cloud-init
+####################################
+detect_cloud_init() {
+    if command -v cloud-init &>/dev/null; then
+        return 0
+    fi
+    
+    # 检查是否存在 cloud-init 配置
+    if [[ -d /etc/cloud ]] || [[ -f "$CLOUD_INIT_SSH_CONFIG" ]]; then
+        return 0
+    fi
+    
+    return 1
+}
+
+####################################
+# 查找 cloud-init SSH 配置文件
+####################################
+find_cloud_init_ssh_config() {
+    local config_files=(
+        "${SSHD_CONFIG_DIR}/50-cloud-init.conf"
+        "${SSHD_CONFIG_DIR}/60-cloudimg-settings.conf"
+        "${SSHD_CONFIG_DIR}/99-cloud-init.conf"
+    )
+    
+    for config in "${config_files[@]}"; do
+        if [[ -f "$config" ]]; then
+            echo "$config"
+            return 0
+        fi
+    done
+    
+    # 搜索所有可能的 cloud-init 配置
+    if [[ -d "$SSHD_CONFIG_DIR" ]]; then
+        local found
+        found=$(find "$SSHD_CONFIG_DIR" -type f -name "*cloud*" 2>/dev/null | head -n1)
+        if [[ -n "$found" ]]; then
+            echo "$found"
+            return 0
+        fi
+    fi
+    
+    return 1
+}
+
+####################################
+# 配置 cloud-init SSH drop-in
+####################################
+configure_cloud_init_ssh() {
+    local password_auth="$1"
+    local pubkey_auth="$2"
+    
+    msg_cloud "检测到 cloud-init 系统"
+    
+    # 创建 drop-in 目录
+    mkdir -p "$SSHD_CONFIG_DIR"
+    
+    # 查找现有配置
+    local cloud_config
+    cloud_config=$(find_cloud_init_ssh_config)
+    
+    if [[ -n "$cloud_config" ]]; then
+        msg_info "找到 cloud-init SSH 配置: $cloud_config"
+        # 备份原配置
+        cp "$cloud_config" "${cloud_config}.backup.$(date +%Y%m%d_%H%M%S)"
+    else
+        cloud_config="$CLOUD_INIT_SSH_CONFIG"
+        msg_info "创建新的 cloud-init SSH 配置: $cloud_config"
+    fi
+    
+    # 写入配置 (修复：添加 KbdInteractiveAuthentication)
+    cat > "$cloud_config" <<EOF
+# Managed by SSH Auth Setup Script v${SCRIPT_VERSION}
+# Generated: $(date)
+
+PasswordAuthentication ${password_auth}
+PubkeyAuthentication ${pubkey_auth}
+KbdInteractiveAuthentication yes
+PermitRootLogin yes
+UsePAM yes
+EOF
+    
+    chmod 644 "$cloud_config"
+    msg_ok "cloud-init SSH 配置已更新"
+    
+    # 验证配置生效
+    echo ""
+    msg_info "验证最终 SSH 配置..."
+    local password_check pubkey_check
+    password_check=$(sshd -T 2>/dev/null | grep "^passwordauthentication" | awk '{print $2}')
+    pubkey_check=$(sshd -T 2>/dev/null | grep "^pubkeyauthentication" | awk '{print $2}')
+    
+    echo " PasswordAuthentication: ${password_check}"
+    echo " PubkeyAuthentication: ${pubkey_check}"
+    echo " PermitRootLogin: $(sshd -T 2>/dev/null | grep "^permitrootlogin" | awk '{print $2}')"
+    echo ""
+    
+    if [[ "$password_check" != "$password_auth" ]]; then
+        msg_warn "警告: PasswordAuthentication 配置可能未生效"
+        msg_info "可能需要重启系统"
+    fi
+    
+    if [[ "$pubkey_check" != "$pubkey_auth" ]]; then
+        msg_warn "警告: PubkeyAuthentication 配置可能未生效"
+        msg_info "可能需要重启系统"
+    fi
+}
+
+####################################
+# 禁用 cloud-init SSH 管理（永久密码登录）
+####################################
+disable_cloud_init_ssh_management() {
+    msg_cloud "配置 cloud-init 永久启用密码登录"
+    
+    mkdir -p "$CLOUD_INIT_CFG_DIR"
+    
+    cat > "$CLOUD_INIT_DISABLE_FILE" <<'EOF'
+# Disable cloud-init SSH authentication management
+# This ensures password authentication remains enabled after reboot
+
+ssh_pwauth: true
+
+# Prevent cloud-init from managing SSH config
+ssh_deletekeys: false
+ssh_genkeytypes: []
+
+# Keep our SSH configuration
+bootcmd:
+  - [ sh, -c, 'echo "SSH config managed manually" > /var/log/cloud-init-ssh-disabled.log' ]
+EOF
+    
+    chmod 644 "$CLOUD_INIT_DISABLE_FILE"
+    msg_ok "cloud-init SSH 管理已禁用"
+    
+    log_msg "Created cloud-init disable file: $CLOUD_INIT_DISABLE_FILE"
+}
+
+####################################
+# 提示重启（仅在需要时）
+####################################
+prompt_reboot_if_needed() {
+    local password_check pubkey_check password_expected pubkey_expected
+    
+    password_expected="$1"
+    pubkey_expected="$2"
+    
+    password_check=$(sshd -T 2>/dev/null | grep "^passwordauthentication" | awk '{print $2}')
+    pubkey_check=$(sshd -T 2>/dev/null | grep "^pubkeyauthentication" | awk '{print $2}')
+    
+    if [[ "$password_check" != "$password_expected" ]] || [[ "$pubkey_check" != "$pubkey_expected" ]]; then
+        echo ""
+        msg_warn "配置可能需要重启才能完全生效"
+        echo ""
+        read -p "是否现在重启系统? (yes/no): " do_reboot
+        
+        if [[ "$do_reboot" == "yes" ]]; then
+            msg_info "系统将在 5 秒后重启..."
+            sleep 5
+            reboot
+        else
+            msg_info "请稍后手动重启: reboot"
+        fi
+    fi
+}
+
+####################################
 # 检测当前认证方式
 ####################################
 detect_current_auth_method() {
@@ -115,7 +291,7 @@ detect_current_auth_method() {
     if [[ -f /etc/shadow ]]; then
         local root_shadow
         root_shadow=$(grep "^root:" /etc/shadow 2>/dev/null || echo "")
-        if [[ -n "$root_shadow" ]] && echo "$root_shadow" | awk -F: '{print $2}' | grep -qvE '^(\*|!)'; then
+        if [[ -n "$root_shadow" ]] && echo "$root_shadow" | awk -F: '{print $2}' | grep -qvE '^(\*|!|\*LOCK\*)'; then
             has_password=true
         fi
     fi
@@ -166,6 +342,11 @@ show_current_status() {
             ;;
     esac
     
+    # 检测 cloud-init
+    if detect_cloud_init; then
+        msg_cloud "检测到 cloud-init 系统"
+    fi
+    
     echo "=========================================="
     echo ""
     
@@ -198,19 +379,19 @@ restore_sshd_config() {
 }
 
 ####################################
-# 修改 SSH 配置
+# 修改 SSH 配置 (核心修复)
 ####################################
 set_sshd_option() {
     local key="$1"
     local value="$2"
    
-    if grep -qE "^[[:space:]]*${key}[[:space:]]" "$SSHD_CONFIG"; then
-        sed -i "s/^[[:space:]]*${key}[[:space:]].*/${key} ${value}/" "$SSHD_CONFIG"
-    elif grep -qE "^[[:space:]]*#[[:space:]]*${key}[[:space:]]" "$SSHD_CONFIG"; then
-        sed -i "s/^[[:space:]]*#[[:space:]]*${key}[[:space:]].*/${key} ${value}/" "$SSHD_CONFIG"
-    else
-        echo "${key} ${value}" >> "$SSHD_CONFIG"
-    fi
+    # 核心修复：彻底删除旧行（包括注释行），防止重复或顺序覆盖
+    # sed -i "/^[[:space:]]*#\?[[:space:]]*${key}[[:space:]]/d" "$SSHD_CONFIG"
+    # 更安全的正则，避免误删类似前缀的配置
+    sed -i "/^[[:space:]]*\(#\)\?[[:space:]]*${key}\([[:space:]]\+\|=\)/d" "$SSHD_CONFIG"
+    
+    # 追加新配置到文件末尾，确保优先级
+    echo "${key} ${value}" >> "$SSHD_CONFIG"
 }
 
 ####################################
@@ -230,7 +411,7 @@ reload_sshd() {
         service="ssh"
     fi
    
-    msg_info "重载 SSH 服务: $service"
+    msg_info "重启 SSH 服务: $service"
    
     # 验证配置
     if ! sshd -t 2>&1 | tee -a "$LOG_FILE"; then
@@ -238,18 +419,17 @@ reload_sshd() {
         return 1
     fi
    
-    # 重载服务（不中断连接）
-    if systemctl reload "$service" 2>&1 | tee -a "$LOG_FILE"; then
+    # 核心修复：使用 restart 而不是 reload，确保 auth 方式变更立即生效
+    if systemctl restart "$service" 2>&1 | tee -a "$LOG_FILE"; then
         sleep 2
         if systemctl is-active --quiet "$service"; then
-            msg_ok "SSH 服务已重载"
+            msg_ok "SSH 服务已重启"
             return 0
         fi
     fi
    
-    msg_warn "SSH 服务重载失败，尝试重启"
-    systemctl restart "$service" 2>&1 | tee -a "$LOG_FILE" || true
-    return 0
+    msg_warn "SSH 服务重启失败"
+    return 1
 }
 
 ####################################
@@ -264,8 +444,6 @@ disable_key_auth() {
         msg_ok "已备份并禁用 authorized_keys"
         log_msg "Moved $AUTH_KEYS_FILE to $AUTH_KEYS_BACKUP"
     fi
-    
-    set_sshd_option "PubkeyAuthentication" "no"
 }
 
 ####################################
@@ -280,8 +458,6 @@ restore_key_auth() {
         chmod 600 "$AUTH_KEYS_FILE"
         msg_ok "已恢复 authorized_keys"
     fi
-    
-    set_sshd_option "PubkeyAuthentication" "yes"
 }
 
 ####################################
@@ -314,7 +490,7 @@ set_root_password_interactive() {
     if passwd root 2>&1 | tee -a "$LOG_FILE"; then
         # 验证密码是否真的设置成功
         sleep 1
-        if grep "^root:" /etc/shadow 2>/dev/null | awk -F: '{print $2}' | grep -qvE '^(\*|!)'; then
+        if grep "^root:" /etc/shadow 2>/dev/null | awk -F: '{print $2}' | grep -qvE '^(\*|!|\*LOCK\*)'; then
             msg_ok "root 密码设置成功"
             return 0
         else
@@ -334,7 +510,7 @@ test_password_capability() {
     msg_info "检测密码登录能力..."
     
     # 检查 PAM 配置
-    if [[ ! -f /etc/pam.d/sshd ]]; then
+    if [[ ! -f /etc/pam.d/sshd ]] && [[ ! -f /etc/pam.d/ssh ]]; then
         msg_warn "未找到 PAM SSH 配置文件"
         return 1
     fi
@@ -570,6 +746,11 @@ mode_hybrid() {
     
     # 检测当前认证方式
     local current_auth=$(detect_current_auth_method)
+    local is_cloud_init=false
+    
+    if detect_cloud_init; then
+        is_cloud_init=true
+    fi
     
     local backup=$(backup_sshd_config)
     msg_ok "配置已备份"
@@ -590,28 +771,43 @@ mode_hybrid() {
                 exit 1
             fi
             
-            msg_info "步骤 1/3: 设置 root 密码"
+            msg_info "步骤 1/4: 设置 root 密码"
             if ! set_root_password_interactive; then
                 restore_sshd_config "$backup"
                 exit 1
             fi
             
             echo ""
-            msg_info "步骤 2/3: 配置 SSH (保留现有密钥)"
+            msg_info "步骤 2/4: 配置 SSH (保留现有密钥)"
             set_sshd_option "PermitRootLogin" "yes"
             set_sshd_option "PasswordAuthentication" "yes"
             set_sshd_option "PubkeyAuthentication" "yes"
             set_sshd_option "UsePAM" "yes"
+            set_sshd_option "KbdInteractiveAuthentication" "yes" # 修复：强制交互式认证
+            
+            # cloud-init 系统配置
+            if $is_cloud_init; then
+                configure_cloud_init_ssh "yes" "yes"
+                
+                echo ""
+                read -p "是否永久启用密码登录（防止重启后重置）? (yes/no): " permanent
+                if [[ "$permanent" == "yes" ]]; then
+                    disable_cloud_init_ssh_management
+                    msg_ok "已配置永久密码登录"
+                fi
+            fi
+            
             msg_ok "SSH 配置完成，现有密钥不会改变"
             
             echo ""
-            msg_info "步骤 3/3: 重载 SSH 服务"
+            msg_info "步骤 3/4: 重启 SSH 服务"
             if ! reload_sshd; then
                 restore_sshd_config "$backup"
                 exit 1
             fi
             
             echo ""
+            msg_info "步骤 4/4: 测试密码登录"
             if ! test_password_login; then
                 msg_warn "测试失败，是否回滚配置？"
                 read -p "回滚配置? (yes/no): " rollback
@@ -619,6 +815,11 @@ mode_hybrid() {
                     restore_sshd_config "$backup"
                     exit 1
                 fi
+            fi
+            
+            # 检查是否需要重启
+            if $is_cloud_init; then
+                prompt_reboot_if_needed "yes" "yes"
             fi
             
             echo ""
@@ -638,7 +839,7 @@ mode_hybrid() {
             # 清理旧密钥
             cleanup_old_keys
             
-            msg_info "步骤 1/6: 确认 root 密码"
+            msg_info "步骤 1/7: 确认 root 密码"
             if [[ "$current_auth" == "none" ]]; then
                 if ! set_root_password_interactive; then
                     restore_sshd_config "$backup"
@@ -657,7 +858,7 @@ mode_hybrid() {
             fi
             
             echo ""
-            msg_info "步骤 2/6: 生成 SSH 密钥"
+            msg_info "步骤 2/7: 生成 SSH 密钥"
             local key_path
             key_path=$(generate_ssh_key)
             local gen_status=$?
@@ -669,28 +870,49 @@ mode_hybrid() {
             fi
             
             echo ""
-            msg_info "步骤 3/6: 导出密钥格式"
+            msg_info "步骤 3/7: 导出密钥格式"
             export_key_formats "$key_path"
             
             echo ""
-            msg_info "步骤 4/6: 配置密钥认证"
+            msg_info "步骤 4/7: 配置密钥认证"
             setup_authorized_keys "${key_path}.pub" "false"
             
             echo ""
-            msg_info "步骤 5/6: 配置 SSH"
+            msg_info "步骤 5/7: 配置 SSH"
             set_sshd_option "PermitRootLogin" "yes"
             set_sshd_option "PasswordAuthentication" "yes"
             set_sshd_option "PubkeyAuthentication" "yes"
             set_sshd_option "UsePAM" "yes"
+            set_sshd_option "KbdInteractiveAuthentication" "yes" # 修复：强制交互式认证
+            
+            # cloud-init 系统配置
+            if $is_cloud_init; then
+                configure_cloud_init_ssh "yes" "yes"
+                
+                echo ""
+                read -p "是否永久启用密码登录（防止重启后重置）? (yes/no): " permanent
+                if [[ "$permanent" == "yes" ]]; then
+                    disable_cloud_init_ssh_management
+                    msg_ok "已配置永久密码登录"
+                fi
+            fi
+            
             msg_ok "SSH 配置完成"
             
             echo ""
-            msg_info "步骤 6/6: 重载 SSH 服务"
+            msg_info "步骤 6/7: 重启 SSH 服务"
             if ! reload_sshd; then
                 restore_sshd_config "$backup"
                 exit 1
             fi
             
+            # 检查是否需要重启
+            if $is_cloud_init; then
+                prompt_reboot_if_needed "yes" "yes"
+            fi
+            
+            echo ""
+            msg_info "步骤 7/7: 测试完成"
             echo ""
             msg_ok "混合认证模式配置完成"
             echo ""
@@ -719,11 +941,25 @@ mode_hybrid() {
                 msg_ok "密码已更新"
             fi
             
-            # 确保配置正确
+            # 确保配置正确 (覆盖修复)
             set_sshd_option "PermitRootLogin" "yes"
             set_sshd_option "PasswordAuthentication" "yes"
             set_sshd_option "PubkeyAuthentication" "yes"
             set_sshd_option "UsePAM" "yes"
+            set_sshd_option "KbdInteractiveAuthentication" "yes"
+            
+            # cloud-init 系统配置
+            if $is_cloud_init; then
+                configure_cloud_init_ssh "yes" "yes"
+                
+                if [[ ! -f "$CLOUD_INIT_DISABLE_FILE" ]]; then
+                    echo ""
+                    read -p "是否永久启用密码登录（防止重启后重置）? (yes/no): " permanent
+                    if [[ "$permanent" == "yes" ]]; then
+                        disable_cloud_init_ssh_management
+                    fi
+                fi
+            fi
             
             reload_sshd
             
@@ -755,6 +991,11 @@ mode_password_only() {
         msg_info "建议: 使用密钥认证（模式 1 或 3）"
         exit 1
     fi
+    
+    local is_cloud_init=false
+    if detect_cloud_init; then
+        is_cloud_init=true
+    fi
    
     local backup=$(backup_sshd_config)
     msg_ok "配置已备份"
@@ -779,14 +1020,28 @@ mode_password_only() {
     set_sshd_option "PasswordAuthentication" "yes"
     set_sshd_option "PubkeyAuthentication" "no"
     set_sshd_option "UsePAM" "yes"
+    set_sshd_option "KbdInteractiveAuthentication" "yes" # 修复：强制交互式认证
+    
+    # cloud-init 系统配置（默认永久启用密码）
+    if $is_cloud_init; then
+        configure_cloud_init_ssh "yes" "no"
+        disable_cloud_init_ssh_management
+        msg_cloud "已配置永久密码登录"
+    fi
+    
     msg_ok "SSH 配置完成"
    
     # 重载服务
     echo ""
-    msg_info "步骤 4/4: 重载 SSH 服务"
+    msg_info "步骤 4/4: 重启 SSH 服务"
     if ! reload_sshd; then
         restore_sshd_config "$backup"
         exit 1
+    fi
+    
+    # 检查是否需要重启
+    if $is_cloud_init; then
+        prompt_reboot_if_needed "yes" "no"
     fi
    
     # 测试密码登录
@@ -806,7 +1061,7 @@ mode_password_only() {
     msg_ok "仅密码认证模式配置完成"
     echo ""
     echo "当前状态:"
-    echo " ✓ 密码登录: 已启用"
+    echo " ✓ 密码登录: 已启用（永久）"
     echo " ✗ 密钥登录: 已禁用"
     echo ""
     msg_warn "安全提示: 密码认证相对不安全"
@@ -816,7 +1071,7 @@ mode_password_only() {
 }
 
 ####################################
-# 模式3: 仅密钥（修复死循环）
+# 模式3: 仅密钥
 ####################################
 mode_key_only() {
     echo ""
@@ -824,6 +1079,11 @@ mode_key_only() {
     msg_info "模式 3: 仅密钥认证 (推荐)"
     echo "=========================================="
     echo ""
+    
+    local is_cloud_init=false
+    if detect_cloud_init; then
+        is_cloud_init=true
+    fi
    
     local backup=$(backup_sshd_config)
     msg_ok "配置已备份"
@@ -860,6 +1120,12 @@ mode_key_only() {
     set_sshd_option "PermitRootLogin" "yes"
     set_sshd_option "PubkeyAuthentication" "yes"
     set_sshd_option "PasswordAuthentication" "yes"
+    set_sshd_option "KbdInteractiveAuthentication" "yes" # 临时开启以便测试
+    
+    # cloud-init 系统配置
+    if $is_cloud_init; then
+        configure_cloud_init_ssh "yes" "yes"
+    fi
    
     if ! reload_sshd; then
         restore_sshd_config "$backup"
@@ -882,7 +1148,19 @@ mode_key_only() {
         echo ""
         msg_info "禁用密码登录"
         set_sshd_option "PasswordAuthentication" "no"
+        set_sshd_option "KbdInteractiveAuthentication" "no" # 禁用交互式认证
+        
+        # cloud-init 系统配置
+        if $is_cloud_init; then
+            configure_cloud_init_ssh "no" "yes"
+        fi
+        
         reload_sshd
+        
+        # 检查是否需要重启
+        if $is_cloud_init; then
+            prompt_reboot_if_needed "no" "yes"
+        fi
         
         echo ""
         msg_ok "仅密钥认证模式配置完成"
@@ -892,6 +1170,10 @@ mode_key_only() {
         echo " ✓ 密钥登录: 已启用"
     else
         # test_result == 2，保持混合模式
+        if $is_cloud_init; then
+            prompt_reboot_if_needed "yes" "yes"
+        fi
+        
         echo ""
         msg_ok "混合认证模式已启用"
         echo ""
@@ -927,6 +1209,7 @@ show_menu() {
     echo "2) 仅密码认证"
     echo " - 只允许密码登录"
     echo " - 会禁用现有密钥"
+    echo " - 自动配置永久密码"
     echo ""
     echo "3) 仅密钥认证 (推荐)"
     echo " - 只允许密钥登录"
