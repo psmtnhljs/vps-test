@@ -1,4 +1,4 @@
-#Quorecs个人笔记
+个人笔记
 服务器配置密码/密钥/混合登录
 
 bash <(curl -sSL https://raw.githubusercontent.com/psmtnhljs/vps-test/main/troot.sh)
