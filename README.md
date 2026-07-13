@@ -13,7 +13,7 @@
 | `ddns.sh` | Cloudflare DDNS | 将域名解析自动更新到当前公网 IP，适合动态 IP 或小型 VPS。 |
 | `media.sh` | 媒体解锁检测 | 检测 Netflix、Disney+、YouTube Premium、Prime Video、Spotify、OpenAI、Google Play 等服务的可访问情况。 |
 | `tk.sh` | TikTok 地区检测 | 检测当前服务器出口 IP 的 TikTok 区域信息。 |
-| `xrayQ.sh` | Xray 快速配置 | 自动安装 Xray，并生成 `socks` 或 `vmess` 配置，支持多出口 IP。 |
+| `xrayQ.sh` | Xray 快速配置 | 自动安装 Xray，并生成 `socks`、`vmess` 或 `ss` 配置，支持多出口 IP。 |
 | `ip.sh` | IP 信息查询 | 通过 `ipinfo.io` 查询指定 IP 或本机公网 IP 信息。 |
 | `delete.sh` | 云厂商组件卸载 | 清理常见云厂商/安全组件、监控代理等残留。 |
 | `uninstall-xmr.sh` | 挖矿程序卸载 | 清理 MoneroOcean / XMRig 相关残留。 |
@@ -125,16 +125,20 @@ bash tk.sh -I eth0
 
 脚本会自动安装 Xray，并根据服务器现有公网 IP 生成配置。
 
-支持两种配置类型：
+支持三种配置类型：
 
 - `socks`
 - `vmess`
+- `ss`
+
+其中 `ss` 模式默认使用 `aes-256-gcm`，也支持输入 `aes256` 作为简写。
 
 示例：
 
 ```bash
 sudo bash xrayQ.sh socks
 sudo bash xrayQ.sh vmess
+sudo bash xrayQ.sh ss
 ```
 
 执行时会根据提示输入端口、账号、密码、UUID 或 WebSocket 路径等信息。
