@@ -90,20 +90,29 @@ bash <(curl -fsSL https://raw.githubusercontent.com/psmtnhljs/vps-test/main/unin
 
 用于把 Cloudflare 解析记录自动更新为当前公网 IP。
 
-运行前需要准备：
+首次运行时会进入交互式配置，按提示填写：
 
 - Cloudflare API Key
 - Cloudflare 账号邮箱
 - 域名的 Zone 名称
 - 要更新的主机名
+- 记录类型、TTL、cron 表达式，以及是否记录日志
 
-示例思路：
+配置完成后，脚本会把信息保存到用户目录，并可选择自动安装 `crontab` 任务，定时检测公网 IP。IP 发生变化时才会更新 Cloudflare 记录。
+
+常用方式：
+
+```bash
+bash ddns.sh
+```
+
+如果你想继续使用旧的命令行参数，也仍然支持：
 
 ```bash
 bash ddns.sh -k <api-key> -u <email> -h <host.example.com> -z <example.com> -t A
 ```
 
-IPv6 记录可将 `-t` 设为 `AAAA`。
+IPv6 记录可将 `-t` 设为 `AAAA`。脚本也支持 `--install-cron`、`--remove-cron` 和 `--show-config`。
 
 ### 4. `media.sh`：媒体解锁检测
 
