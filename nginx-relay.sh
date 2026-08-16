@@ -673,9 +673,10 @@ render_relay_config() {
             else
                 printf '    server {\n'
                 if [[ "$family" == "6" ]]; then
-                    printf '        resolver [2001:4860:4860::8888] [2606:4700:4700::1111] valid=30s ipv4=off ipv6=on;\n'
+                    # 兼容 Nginx 1.22：ipv4/ipv6 resolver 参数在较新版本才可用。
+                    printf '        resolver [2001:4860:4860::8888] [2606:4700:4700::1111] valid=30s;\n'
                 else
-                    printf '        resolver 8.8.8.8 1.1.1.1 valid=30s ipv4=on ipv6=off;\n'
+                    printf '        resolver 8.8.8.8 1.1.1.1 valid=30s;\n'
                 fi
             fi
 
