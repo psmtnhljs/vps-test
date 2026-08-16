@@ -12,6 +12,21 @@ chmod +x *.sh
 
 大多数脚本需要 root 权限。通过 SSH 修改系统配置前，请保留一个可回退的登录窗口或云控制台。
 
+## 一键运行远程脚本
+
+确认脚本来源和内容后，也可以直接使用 GitHub Raw 地址运行：
+
+```bash
+# 本仓库脚本
+bash <(curl -Ls https://raw.githubusercontent.com/psmtnhljs/vps-test/main/nginx-relay.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/psmtnhljs/vps-test/main/ddns.sh)
+
+# XrayR 一键安装脚本
+bash <(curl -Ls https://raw.githubusercontent.com/psmtnhljs/XrayR-release-bak/master/install.sh)
+```
+
+需要 root 权限的脚本请使用 `sudo bash <(curl ...)`，或者先切换到 root。远程脚本会直接在当前服务器上执行，生产环境使用前建议先检查 Raw 文件内容，并确认仓库地址可信。
+
 ## 脚本列表
 
 | 文件 | 用途 | 权限 |
