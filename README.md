@@ -14,18 +14,32 @@ chmod +x *.sh
 
 ## 一键运行远程脚本
 
-确认脚本来源和内容后，也可以直接使用 GitHub Raw 地址运行：
+只有部分不修改系统配置的检测脚本适合直接通过 GitHub Raw 运行，例如 `ip.sh` 和 `tk.sh`：
 
 ```bash
-# 本仓库脚本
-bash <(curl -Ls https://raw.githubusercontent.com/psmtnhljs/vps-test/main/nginx-relay.sh)
-bash <(curl -Ls https://raw.githubusercontent.com/psmtnhljs/vps-test/main/ddns.sh)
+# IP 信息查询
+bash <(curl -Ls https://raw.githubusercontent.com/psmtnhljs/vps-test/main/ip.sh)
 
-# XrayR 一键安装脚本
-bash <(curl -Ls https://raw.githubusercontent.com/psmtnhljs/XrayR-release-bak/master/install.sh)
+# TikTok 地区检测
+bash <(curl -Ls https://raw.githubusercontent.com/psmtnhljs/vps-test/main/tk.sh)
 ```
 
-需要 root 权限的脚本请使用 `sudo bash <(curl ...)`，或者先切换到 root。远程脚本会直接在当前服务器上执行，生产环境使用前建议先检查 Raw 文件内容，并确认仓库地址可信。
+大部分脚本会安装软件或修改系统配置，建议先用 `wget` 下载到本地，检查内容后再运行。例如：
+
+```bash
+# 下载 Nginx 转发脚本
+wget -O nginx-relay.sh https://raw.githubusercontent.com/psmtnhljs/vps-test/main/nginx-relay.sh
+less nginx-relay.sh
+chmod +x nginx-relay.sh
+sudo bash nginx-relay.sh
+
+# 下载其他脚本时使用相同方式
+wget -O ddns.sh https://raw.githubusercontent.com/psmtnhljs/vps-test/main/ddns.sh
+wget -O root.sh https://raw.githubusercontent.com/psmtnhljs/vps-test/main/root.sh
+wget -O fail2ban-sshctl.sh https://raw.githubusercontent.com/psmtnhljs/vps-test/main/fail2ban-sshctl.sh
+```
+
+下载到本地后，请根据脚本用途决定是否使用 `sudo`。远程脚本会直接在当前服务器上执行或覆盖同名文件，生产环境使用前务必检查 Raw 文件内容，并确认仓库地址可信。
 
 ## 脚本列表
 
