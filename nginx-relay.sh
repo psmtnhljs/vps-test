@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.1.0"
 readonly NGINX_CONF="/etc/nginx/nginx.conf"
 readonly RELAY_DIR="/etc/nginx/stream.d"
 readonly RELAY_CONF="${RELAY_DIR}/nginx-relay.conf"
@@ -26,9 +26,18 @@ HAS_IPV4=0
 HAS_IPV6=0
 LOCAL_IPV4=()
 LOCAL_IPV6=()
+LOCAL_PUBLIC_IPV4=()
+LOCAL_PRIVATE_IPV4=()
+LOCAL_PUBLIC_IPV6=()
+LOCAL_PRIVATE_IPV6=()
+HAS_PUBLIC_IPV4=0
+HAS_PRIVATE_IPV4=0
+HAS_PUBLIC_IPV6=0
+HAS_PRIVATE_IPV6=0
 SELECTED_BIND_IP=""
 SELECTED_FAMILY=""
 SELECTED_PROTOCOL=""
+SELECTED_SCOPE=""
 
 C_RESET='\033[0m'
 C_GREEN='\033[32m'
@@ -151,6 +160,47 @@ PY
     [[ "$ip" =~ ^[0-9A-Fa-f:]+$ ]]
 }
 
+is_private_ipv4() {
+    local ip="$1" a b c d
+    is_ipv4 "$ip" || return 1
+    IFS='.' read -r a b c d <<< "$ip"
+    (( a == 10 )) && return 0
+    (( a == 172 && b >= 16 && b <= 31 )) && return 0
+    (( a == 192 && b == 168 )) && return 0
+    (( a == 100 && b >= 64 && b <= 127 )) && return 0
+    (( a == 169 && b == 254 )) && return 0
+    return 1
+}
+
+is_private_ipv6() {
+    local ip="$1"
+    is_ipv6 "$ip" || return 1
+    if command_exists python3; then
+        python3 - "$ip" <<'PY'
+import ipaddress
+import sys
+
+try:
+    address = ipaddress.IPv6Address(sys.argv[1])
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0 if address.is_private else 1)
+PY
+        return $?
+    fi
+    [[ "${ip,,}" =~ ^f[cd] ]]
+}
+
+is_private_address() {
+    local ip="$1" family
+    family="$(ip_family "$ip" || true)"
+    case "$family" in
+        4) is_private_ipv4 "$ip" ;;
+        6) is_private_ipv6 "$ip" ;;
+        *) return 1 ;;
+    esac
+}
+
 ip_family() {
     local ip="$1"
     if is_ipv4 "$ip"; then
@@ -165,6 +215,10 @@ ip_family() {
 refresh_ip_status() {
     LOCAL_IPV4=()
     LOCAL_IPV6=()
+    LOCAL_PUBLIC_IPV4=()
+    LOCAL_PRIVATE_IPV4=()
+    LOCAL_PUBLIC_IPV6=()
+    LOCAL_PRIVATE_IPV6=()
 
     if command_exists ip; then
         while IFS= read -r value; do
@@ -178,6 +232,27 @@ refresh_ip_status() {
 
     if [[ ${#LOCAL_IPV4[@]} -gt 0 ]]; then HAS_IPV4=1; else HAS_IPV4=0; fi
     if [[ ${#LOCAL_IPV6[@]} -gt 0 ]]; then HAS_IPV6=1; else HAS_IPV6=0; fi
+
+    local ip
+    for ip in "${LOCAL_IPV4[@]}"; do
+        if is_private_ipv4 "$ip"; then
+            LOCAL_PRIVATE_IPV4+=("$ip")
+        else
+            LOCAL_PUBLIC_IPV4+=("$ip")
+        fi
+    done
+    for ip in "${LOCAL_IPV6[@]}"; do
+        if is_private_ipv6 "$ip"; then
+            LOCAL_PRIVATE_IPV6+=("$ip")
+        else
+            LOCAL_PUBLIC_IPV6+=("$ip")
+        fi
+    done
+
+    [[ ${#LOCAL_PUBLIC_IPV4[@]} -gt 0 ]] && HAS_PUBLIC_IPV4=1 || HAS_PUBLIC_IPV4=0
+    [[ ${#LOCAL_PRIVATE_IPV4[@]} -gt 0 ]] && HAS_PRIVATE_IPV4=1 || HAS_PRIVATE_IPV4=0
+    [[ ${#LOCAL_PUBLIC_IPV6[@]} -gt 0 ]] && HAS_PUBLIC_IPV6=1 || HAS_PUBLIC_IPV6=0
+    [[ ${#LOCAL_PRIVATE_IPV6[@]} -gt 0 ]] && HAS_PRIVATE_IPV6=1 || HAS_PRIVATE_IPV6=0
 }
 
 show_ip_status() {
@@ -194,11 +269,17 @@ show_ip_status() {
         warn "未检测到可用的全局 IPv4/IPv6 地址，请先检查网络配置。"
     fi
 
-    if (( HAS_IPV4 == 1 )); then
-        printf '  IPv4 出站地址：%s\n' "${LOCAL_IPV4[*]}"
+    if (( HAS_PUBLIC_IPV4 == 1 )); then
+        printf '  IPv4 外网地址：%s\n' "${LOCAL_PUBLIC_IPV4[*]}"
     fi
-    if (( HAS_IPV6 == 1 )); then
-        printf '  IPv6 出站地址：%s\n' "${LOCAL_IPV6[*]}"
+    if (( HAS_PRIVATE_IPV4 == 1 )); then
+        printf '  IPv4 内网地址：%s\n' "${LOCAL_PRIVATE_IPV4[*]}"
+    fi
+    if (( HAS_PUBLIC_IPV6 == 1 )); then
+        printf '  IPv6 外网地址：%s\n' "${LOCAL_PUBLIC_IPV6[*]}"
+    fi
+    if (( HAS_PRIVATE_IPV6 == 1 )); then
+        printf '  IPv6 内网地址：%s\n' "${LOCAL_PRIVATE_IPV6[*]}"
     fi
 }
 
@@ -479,7 +560,7 @@ choose_protocol() {
 
 choose_family_for_domain() {
     local value
-    if (( HAS_IPV4 == 1 && HAS_IPV6 == 1 )); then
+    if (( HAS_PUBLIC_IPV4 == 1 && HAS_PUBLIC_IPV6 == 1 )); then
         while true; do
             value="$(prompt "目标地址族 1) IPv4  2) IPv6" "1")"
             case "$value" in
@@ -488,29 +569,41 @@ choose_family_for_domain() {
                 *) warn "请输入 1 或 2。" ;;
             esac
         done
-    elif (( HAS_IPV4 == 1 )); then
+    elif (( HAS_PUBLIC_IPV4 == 1 )); then
         SELECTED_FAMILY="4"
-        info "当前为纯 IPv4，域名转发默认使用 IPv4。"
-    elif (( HAS_IPV6 == 1 )); then
+        info "当前可用外网地址为 IPv4，域名转发默认使用 IPv4。"
+    elif (( HAS_PUBLIC_IPV6 == 1 )); then
         SELECTED_FAMILY="6"
-        info "当前为纯 IPv6，域名转发默认使用 IPv6，不支持 IPv4 服务转发。"
+        info "当前可用外网地址为 IPv6，域名转发默认使用 IPv6。"
     else
-        die "未检测到可用 IP，无法创建转发。"
+        die "未检测到可用外网 IP，无法创建外网域名转发。"
     fi
 }
 
 choose_bind_ip() {
     local family="$1"
-    local -n candidates
-    if [[ "$family" == "4" ]]; then
-        candidates=LOCAL_IPV4
+    local scope="${2:-public}"
+    local array_name
+    if [[ "$scope" == "private" && "$family" == "4" ]]; then
+        array_name="LOCAL_PRIVATE_IPV4"
+    elif [[ "$scope" == "private" && "$family" == "6" ]]; then
+        array_name="LOCAL_PRIVATE_IPV6"
+    elif [[ "$scope" == "public" && "$family" == "4" ]]; then
+        array_name="LOCAL_PUBLIC_IPV4"
+    elif [[ "$scope" == "public" && "$family" == "6" ]]; then
+        array_name="LOCAL_PUBLIC_IPV6"
     else
-        candidates=LOCAL_IPV6
+        die "无效的地址族或地址范围。"
     fi
 
+    local -n candidates="$array_name"
     (( ${#candidates[@]} > 0 )) || die "没有可用的 IPv${family} 出站地址。"
     msg ""
-    msg "可用的 IPv${family} 出站地址："
+    if [[ "$scope" == "private" ]]; then
+        msg "可用的 IPv${family} 内网出站地址："
+    else
+        msg "可用的 IPv${family} 外网出站地址："
+    fi
     local i=1 ip choice
     for ip in "${candidates[@]}"; do
         printf '  %d) %s\n' "$i" "$ip"
@@ -520,6 +613,7 @@ choose_bind_ip() {
     [[ "$choice" =~ ^[0-9]+$ ]] || die "出站 IP 选项无效。"
     (( choice >= 1 && choice <= ${#candidates[@]} )) || die "出站 IP 选项超出范围。"
     SELECTED_BIND_IP="${candidates[$((choice - 1))]}"
+    SELECTED_SCOPE="$scope"
 }
 
 next_relay_id() {
@@ -535,12 +629,12 @@ next_relay_id() {
 }
 
 append_relay() {
-    local id="$1" kind="$2" protocol="$3" listen_port="$4" target="$5" target_port="$6" family="$7" bind_ip="$8"
+    local id="$1" kind="$2" protocol="$3" listen_port="$4" target="$5" target_port="$6" family="$7" bind_ip="$8" scope="$9"
     mkdir -p "$RELAY_DIR"
     touch "$RELAY_DB"
     chmod 600 "$RELAY_DB"
-    printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
-        "$id" "$kind" "$protocol" "$listen_port" "$target" "$target_port" "$family" "$bind_ip" >> "$RELAY_DB"
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+        "$id" "$kind" "$protocol" "$listen_port" "$target" "$target_port" "$family" "$bind_ip" "$scope" >> "$RELAY_DB"
 }
 
 remove_last_relay() {
@@ -553,7 +647,7 @@ remove_last_relay() {
 
 render_relay_config() {
     local output="$1"
-    local id kind protocol listen_port target target_port family bind_ip
+    local id kind protocol listen_port target target_port family bind_ip scope
     {
         printf '# This file is generated by nginx-relay.sh. Do not edit manually.\n'
         printf '# Regenerate by running the script and using the relay management menu.\n\n'
@@ -565,10 +659,11 @@ render_relay_config() {
             return 0
         fi
 
-        while IFS='|' read -r id kind protocol listen_port target target_port family bind_ip; do
+        while IFS='|' read -r id kind protocol listen_port target target_port family bind_ip scope; do
             [[ -n "$id" ]] || continue
-            printf '    # %s: %s %s -> %s:%s (IPv%s, bind %s)\n' "$id" "$kind" "$protocol" "$target" "$target_port" "$family" "$bind_ip"
-            if [[ "$kind" == "static-ip" ]]; then
+            [[ -n "$scope" ]] || scope="external"
+            printf '    # %s: %s/%s %s -> %s:%s (IPv%s, bind %s)\n' "$id" "$scope" "$kind" "$protocol" "$target" "$target_port" "$family" "$bind_ip"
+            if [[ "$kind" == "static-ip" || "$kind" == "internal-ip" ]]; then
                 if [[ "$family" == "6" ]]; then
                     printf '    upstream %s_backend {\n        server [%s]:%s;\n    }\n' "$id" "$target" "$target_port"
                 else
@@ -663,11 +758,14 @@ create_static_relay() {
     target="$(prompt "目标静态 IP")"
     family="$(ip_family "$target" || true)"
     [[ "$family" == "4" || "$family" == "6" ]] || die "目标 IP 无效，请输入合法 IPv4 或 IPv6 地址。"
-    if [[ "$family" == "4" && "$HAS_IPV4" -ne 1 ]]; then
-        die "当前服务器为纯 IPv6，不能转发 IPv4 服务。"
+    if is_private_address "$target"; then
+        die "目标 IP 属于内网地址，请使用‘创建内网 IP 转发’菜单。"
     fi
-    if [[ "$family" == "6" && "$HAS_IPV6" -ne 1 ]]; then
-        die "当前服务器没有 IPv6，不能转发 IPv6 服务。"
+    if [[ "$family" == "4" && "$HAS_PUBLIC_IPV4" -ne 1 ]]; then
+        die "当前服务器没有外网 IPv4，不能创建外网 IPv4 转发。"
+    fi
+    if [[ "$family" == "6" && "$HAS_PUBLIC_IPV6" -ne 1 ]]; then
+        die "当前服务器没有外网 IPv6，不能创建外网 IPv6 转发。"
     fi
 
     listen_port="$(prompt "本地监听端口")"
@@ -678,17 +776,53 @@ create_static_relay() {
     target_port="$(prompt "目标服务端口" "22")"
     valid_port "$target_port" || die "目标服务端口必须是 1-65535。"
     choose_protocol
-    choose_bind_ip "$family"
+    choose_bind_ip "$family" "public"
 
     local id
     id="$(next_relay_id)"
-    append_relay "$id" "static-ip" "$SELECTED_PROTOCOL" "$listen_port" "$target" "$target_port" "$family" "$SELECTED_BIND_IP"
+    append_relay "$id" "static-ip" "$SELECTED_PROTOCOL" "$listen_port" "$target" "$target_port" "$family" "$SELECTED_BIND_IP" "external"
     if apply_relay_config; then
         ok "已创建静态 IP 转发：${id}"
         restart_nginx_prompt
     else
         remove_last_relay "$id"
         die "创建静态 IP 转发失败。"
+    fi
+}
+
+create_internal_relay() {
+    refresh_ip_status
+    local target listen_port target_port family
+    target="$(prompt "目标内网 IP（仅允许 RFC1918/ULA 地址）")"
+    family="$(ip_family "$target" || true)"
+    [[ "$family" == "4" || "$family" == "6" ]] || die "目标 IP 无效，请输入合法 IPv4 或 IPv6 地址。"
+    is_private_address "$target" || die "内网转发只允许内网 IPv4 或 IPv6 地址。"
+    if [[ "$family" == "4" && "$HAS_PRIVATE_IPV4" -ne 1 ]]; then
+        die "当前服务器没有内网 IPv4，不能创建内网 IPv4 转发。"
+    fi
+    if [[ "$family" == "6" && "$HAS_PRIVATE_IPV6" -ne 1 ]]; then
+        die "当前服务器没有内网 IPv6，不能创建内网 IPv6 转发。"
+    fi
+
+    listen_port="$(prompt "本地监听端口")"
+    valid_port "$listen_port" || die "本地监听端口必须是 1-65535。"
+    port_in_registry "$listen_port" && die "该端口已存在于转发列表。"
+    port_in_use "$listen_port" && warn "检测到系统已有服务监听该端口，Nginx 测试可能失败。"
+
+    target_port="$(prompt "目标服务端口" "22")"
+    valid_port "$target_port" || die "目标服务端口必须是 1-65535。"
+    choose_protocol
+    choose_bind_ip "$family" "private"
+
+    local id
+    id="$(next_relay_id)"
+    append_relay "$id" "internal-ip" "$SELECTED_PROTOCOL" "$listen_port" "$target" "$target_port" "$family" "$SELECTED_BIND_IP" "internal"
+    if apply_relay_config; then
+        ok "已创建内网 IP 转发：${id}"
+        restart_nginx_prompt
+    else
+        remove_last_relay "$id"
+        die "创建内网 IP 转发失败。"
     fi
 }
 
@@ -713,11 +847,11 @@ create_domain_relay() {
     target_port="$(prompt "目标服务端口" "22")"
     valid_port "$target_port" || die "目标服务端口必须是 1-65535。"
     choose_protocol
-    choose_bind_ip "$SELECTED_FAMILY"
+    choose_bind_ip "$SELECTED_FAMILY" "public"
 
     local id
     id="$(next_relay_id)"
-    append_relay "$id" "domain" "$SELECTED_PROTOCOL" "$listen_port" "$target" "$target_port" "$SELECTED_FAMILY" "$SELECTED_BIND_IP"
+    append_relay "$id" "domain" "$SELECTED_PROTOCOL" "$listen_port" "$target" "$target_port" "$SELECTED_FAMILY" "$SELECTED_BIND_IP" "external"
     if apply_relay_config; then
         ok "已创建域名/DDNS 转发：${id}"
         restart_nginx_prompt
@@ -734,13 +868,14 @@ show_relays() {
         info "暂无转发。"
         return 0
     fi
-    printf '%-12s %-10s %-5s %-8s %-32s %-8s %-6s %s\n' "ID" "类型" "协议" "监听端口" "目标" "目标端口" "族" "proxy_bind"
-    printf '%s\n' "------------------------------------------------------------------------------------------------------------"
-    local id kind protocol listen_port target target_port family bind_ip
-    while IFS='|' read -r id kind protocol listen_port target target_port family bind_ip; do
+    printf '%-12s %-10s %-9s %-5s %-8s %-32s %-8s %-6s %s\n' "ID" "范围" "类型" "协议" "监听端口" "目标" "目标端口" "族" "proxy_bind"
+    printf '%s\n' "----------------------------------------------------------------------------------------------------------------"
+    local id kind protocol listen_port target target_port family bind_ip scope
+    while IFS='|' read -r id kind protocol listen_port target target_port family bind_ip scope; do
         [[ -n "$id" ]] || continue
-        printf '%-12s %-10s %-5s %-8s %-32s %-8s IPv%-5s %s\n' \
-            "$id" "$kind" "$protocol" "$listen_port" "$target" "$target_port" "$family" "$bind_ip"
+        [[ -n "$scope" ]] || scope="external"
+        printf '%-12s %-10s %-12s %-5s %-8s %-32s %-8s IPv%-5s %s\n' \
+            "$id" "$scope" "$kind" "$protocol" "$listen_port" "$target" "$target_port" "$family" "$bind_ip"
     done < "$RELAY_DB"
 }
 
@@ -781,11 +916,12 @@ show_menu() {
     msg " 工作模式：${MODE:-未设置}"
     msg "=============================================="
     msg "1) 显示转发列表"
-    msg "2) 创建静态 IP 转发"
-    msg "3) 创建域名（DDNS）转发"
-    msg "4) 删除转发"
-    msg "5) 测试配置并重启 Nginx"
-    msg "6) 重新执行‘是否保留 Web 服务’设置"
+    msg "2) 创建外网静态 IP 转发"
+    msg "3) 创建外网域名（DDNS）转发"
+    msg "4) 创建内网 IP 转发（仅内网目标）"
+    msg "5) 删除转发"
+    msg "6) 测试配置并重启 Nginx"
+    msg "7) 重新执行‘是否保留 Web 服务’设置"
     msg "0) 退出"
 }
 
@@ -829,9 +965,10 @@ main() {
             1) show_relays ;;
             2) create_static_relay ;;
             3) create_domain_relay ;;
-            4) delete_relay ;;
-            5) check_and_restart ;;
-            6) change_web_mode ;;
+            4) create_internal_relay ;;
+            5) delete_relay ;;
+            6) check_and_restart ;;
+            7) change_web_mode ;;
             0) info "已退出。"; exit 0 ;;
             *) warn "无效选项，请重新输入。" ;;
         esac
