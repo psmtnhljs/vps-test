@@ -222,6 +222,11 @@ nginx_has_stream() {
     nginx -V 2>&1 | grep -q -- '--with-stream'
 }
 
+nginx_stream_is_dynamic() {
+    command_exists nginx || return 1
+    nginx -V 2>&1 | grep -q -- '--with-stream=dynamic'
+}
+
 readonly STREAM_MODULE_PATTERN='^[[:space:]]*load_module[[:space:]]+([^;[:space:]]*/)?ngx_stream_module\.so[[:space:]]*;'
 
 stream_module_loaded_in_file() {
@@ -361,10 +366,14 @@ ensure_stream_layout() {
     mkdir -p "$RELAY_DIR"
 
     local module_path
-    if ! nginx_has_stream; then
+    # --with-stream=dynamic 仍然需要在配置中加载 .so，不能当作静态编译处理。
+    if nginx_stream_is_dynamic || ! nginx_has_stream; then
         module_path="$(find_stream_module || true)"
-        [[ -n "$module_path" ]] || die "未找到 ngx_stream_module.so，请先安装 Nginx stream 模块。"
-        ensure_stream_module_loaded "$module_path"
+        if [[ -n "$module_path" ]]; then
+            ensure_stream_module_loaded "$module_path"
+        elif ! nginx_has_stream; then
+            die "未找到 ngx_stream_module.so，请先安装 Nginx stream 模块。"
+        fi
     fi
 
     if grep -Eq '^[[:space:]]*stream[[:space:]]*\{' "$NGINX_CONF"; then
