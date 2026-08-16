@@ -274,7 +274,8 @@ ensure_stream_module_loaded() {
     # 如果模块已由 modules-enabled 或其他配置加载，清除 nginx.conf 中由旧版本脚本添加的重复项。
     if [[ "$loaded_file" != "$NGINX_CONF" ]] && stream_module_loaded_in_file "$NGINX_CONF"; then
         backup_file "$NGINX_CONF"
-        sed -Ei "/${STREAM_MODULE_PATTERN}/d" "$NGINX_CONF"
+        # 使用 | 作为 sed 分隔符，避免正则中的模块路径斜杠结束表达式。
+        sed -Ei "\\|${STREAM_MODULE_PATTERN}|d" "$NGINX_CONF"
         info "检测到 stream 模块已加载，已移除 nginx.conf 中的重复加载项。"
     fi
 }
