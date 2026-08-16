@@ -87,10 +87,14 @@ backup_file() {
     local file="$1"
     [[ -e "$file" || -L "$file" ]] || return 0
     mkdir -p "$BACKUP_DIR"
-    local base stamp backup
+    local base stamp backup n=1
     base="$(basename "$file")"
     stamp="$(date +%Y%m%d_%H%M%S)"
     backup="${BACKUP_DIR}/${base}.${stamp}.bak"
+    while [[ -e "$backup" || -L "$backup" ]]; do
+        backup="${BACKUP_DIR}/${base}.${stamp}.${n}.bak"
+        ((n++))
+    done
     cp -a "$file" "$backup"
     info "已备份 ${file} -> ${backup}"
 }
@@ -212,6 +216,58 @@ nginx_has_stream() {
     nginx -V 2>&1 | grep -q -- '--with-stream'
 }
 
+readonly STREAM_MODULE_PATTERN='^[[:space:]]*load_module[[:space:]]+([^;[:space:]]*/)?ngx_stream_module\.so[[:space:]]*;'
+
+stream_module_loaded_in_file() {
+    local file="$1"
+    grep -Eq "$STREAM_MODULE_PATTERN" "$file" 2>/dev/null
+}
+
+stream_module_loaded_in_tree() {
+    local file
+    while IFS= read -r -d '' file; do
+        if stream_module_loaded_in_file "$file"; then
+            printf '%s' "$file"
+            return 0
+        fi
+    done < <(find /etc/nginx -path "$BACKUP_DIR" -prune -o \( -type f -o -type l \) -print0 2>/dev/null)
+    return 1
+}
+
+ensure_stream_module_loaded() {
+    local module_path="$1"
+    local loaded_file=""
+    local file
+
+    # Debian/Ubuntu 通常通过 modules-enabled 的相对路径加载模块，优先保留该包管理配置。
+    if [[ -d /etc/nginx/modules-enabled ]]; then
+        while IFS= read -r -d '' file; do
+            if stream_module_loaded_in_file "$file"; then
+                loaded_file="$file"
+                break
+            fi
+        done < <(find /etc/nginx/modules-enabled -maxdepth 1 \( -type f -o -type l \) -print0 2>/dev/null | sort -z)
+    fi
+
+    if [[ -z "$loaded_file" ]]; then
+        loaded_file="$(stream_module_loaded_in_tree || true)"
+    fi
+
+    if [[ -z "$loaded_file" ]]; then
+        backup_file "$NGINX_CONF"
+        sed -i "1i load_module ${module_path};" "$NGINX_CONF"
+        info "已加载动态 stream 模块：${module_path}"
+        return 0
+    fi
+
+    # 如果模块已由 modules-enabled 或其他配置加载，清除 nginx.conf 中由旧版本脚本添加的重复项。
+    if [[ "$loaded_file" != "$NGINX_CONF" ]] && stream_module_loaded_in_file "$NGINX_CONF"; then
+        backup_file "$NGINX_CONF"
+        sed -Ei "/${STREAM_MODULE_PATTERN}/d" "$NGINX_CONF"
+        info "检测到 stream 模块已加载，已移除 nginx.conf 中的重复加载项。"
+    fi
+}
+
 install_nginx_stream() {
     local pm=""
     if command_exists apt-get; then
@@ -299,11 +355,10 @@ ensure_stream_layout() {
     mkdir -p "$RELAY_DIR"
 
     local module_path
-    module_path="$(find_stream_module || true)"
-    if [[ -n "$module_path" ]] && ! grep -RqsF "$module_path" /etc/nginx 2>/dev/null; then
-        backup_file "$NGINX_CONF"
-        sed -i "1i load_module ${module_path};" "$NGINX_CONF"
-        info "已加载动态 stream 模块：${module_path}"
+    if ! nginx_has_stream; then
+        module_path="$(find_stream_module || true)"
+        [[ -n "$module_path" ]] || die "未找到 ngx_stream_module.so，请先安装 Nginx stream 模块。"
+        ensure_stream_module_loaded "$module_path"
     fi
 
     if grep -Eq '^[[:space:]]*stream[[:space:]]*\{' "$NGINX_CONF"; then
