@@ -102,9 +102,16 @@ backup_file() {
 load_state() {
     MODE=""
     if [[ -f "$STATE_FILE" ]]; then
-        # shellcheck disable=SC1090
-        source "$STATE_FILE"
-        [[ "${MODE:-}" == "retain-web" || "${MODE:-}" == "relay-only" ]] || MODE=""
+        # 只读取 MODE，避免 source 状态文件覆盖 readonly 变量或执行外部内容。
+        local saved_mode
+        saved_mode="$(sed -n 's/^MODE=//p' "$STATE_FILE" | tail -n 1)"
+        saved_mode="${saved_mode#\'}"
+        saved_mode="${saved_mode%\'}"
+        saved_mode="${saved_mode#\"}"
+        saved_mode="${saved_mode%\"}"
+        if [[ "$saved_mode" == "retain-web" || "$saved_mode" == "relay-only" ]]; then
+            MODE="$saved_mode"
+        fi
     fi
 }
 
@@ -113,7 +120,6 @@ save_state() {
     umask 077
     cat > "$STATE_FILE" <<EOF
 # nginx-relay.sh state
-SCRIPT_VERSION=$(printf '%q' "$SCRIPT_VERSION")
 MODE=$(printf '%q' "$MODE")
 EOF
 }
