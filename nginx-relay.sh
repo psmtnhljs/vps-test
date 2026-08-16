@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.1.1"
 readonly NGINX_CONF="/etc/nginx/nginx.conf"
 readonly RELAY_DIR="/etc/nginx/stream.d"
 readonly RELAY_CONF="${RELAY_DIR}/nginx-relay.conf"
