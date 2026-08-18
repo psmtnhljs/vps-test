@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-readonly SCRIPT_VERSION="1.1.2"
+readonly SCRIPT_VERSION="1.1.3"
 readonly NGINX_CONF="/etc/nginx/nginx.conf"
 readonly RELAY_DIR="/etc/nginx/stream.d"
 readonly RELAY_CONF="${RELAY_DIR}/nginx-relay.conf"
@@ -727,7 +727,12 @@ choose_bind_ip() {
     choice="$(prompt "请选择出站 IP" "1")"
     [[ "$choice" =~ ^[0-9]+$ ]] || die "出站 IP 选项无效。"
     (( choice >= 1 && choice <= ${#candidates[@]} )) || die "出站 IP 选项超出范围。"
-    SELECTED_BIND_IP="${candidates[$((choice - 1))]}"
+    if (( nat_fallback == 1 )); then
+        # NAT 机器的公网地址不在本机网卡上，省略 proxy_bind，交给系统路由选择本地源地址。
+        SELECTED_BIND_IP="auto"
+    else
+        SELECTED_BIND_IP="${candidates[$((choice - 1))]}"
+    fi
     SELECTED_SCOPE="$scope"
 }
 
@@ -808,7 +813,11 @@ render_relay_config() {
                     printf '        listen %s;\n' "$listen_port"
                 fi
             fi
-            printf '        proxy_bind %s;\n' "$bind_ip"
+            if [[ "$bind_ip" != "auto" ]]; then
+                printf '        proxy_bind %s;\n' "$bind_ip"
+            else
+                printf '        # proxy_bind omitted: NAT egress uses the system routing table.\n'
+            fi
             printf '        proxy_connect_timeout 10s;\n        proxy_timeout 1h;\n'
             if [[ "$kind" == "static-ip" ]]; then
                 printf '        proxy_pass %s_backend;\n' "$id"
