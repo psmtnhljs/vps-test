@@ -153,6 +153,7 @@ bash tk.sh -I eth0
 - 这些脚本会修改系统服务、网络配置或防火墙相关配置，建议先在测试 VPS 验证。
 - `root.sh`、`delete.sh`、`uninstall-xmr.sh` 和 `nginx-relay.sh` 可能影响现有服务，请确认目标机器和配置后再执行。
 - “仅转发”模式会尝试注释 Nginx 配置中的 80/443 `listen` 指令，并在 `/etc/nginx/nginx-relay-backups/` 保存备份。
+- “仅转发”模式还会检测 Caddy、Apache 等其他进程是否占用 80/443，并在停止前向用户确认。
 - 动态域名转发依赖 Nginx 的变量 `proxy_pass` 和 DNS 解析；请确认目标域名及目标端口可用。
 - 不要把 Cloudflare API Key、SSH 私钥或其他凭据写入仓库。
 

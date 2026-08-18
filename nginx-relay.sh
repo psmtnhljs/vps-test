@@ -490,6 +490,7 @@ select_mode_first_run() {
             2)
                 MODE="relay-only"
                 disable_web_ports
+                release_web_port_conflicts
                 break
                 ;;
             *) warn "请输入 1 或 2。" ;;
@@ -524,6 +525,57 @@ disable_web_ports() {
     if (( changed == 0 )); then
         info "未发现需要注释的 80/443 listen 配置。"
     fi
+}
+
+list_listening_pids() {
+    local port="$1"
+    if command_exists lsof; then
+        lsof -nP -t -a -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
+    elif command_exists ss; then
+        ss -H -ltnp 2>/dev/null \
+            | awk -v port=":${port}" '$4 ~ port "$" { print }' \
+            | grep -oE 'pid=[0-9]+' \
+            | cut -d= -f2 \
+            | sort -u
+    fi
+}
+
+release_web_port_conflicts() {
+    local port pid process_name candidate
+    local pids=() seen_names=" " matching_pids
+
+    for port in 80 443; do
+        while IFS= read -r pid; do
+            [[ "$pid" =~ ^[0-9]+$ ]] || continue
+            [[ " ${pids[*]} " == *" ${pid} "* ]] || pids+=("$pid")
+        done < <(list_listening_pids "$port")
+    done
+
+    for pid in "${pids[@]}"; do
+        process_name="$(ps -o comm= -p "$pid" 2>/dev/null | awk '{$1=$1; print}')"
+        [[ -n "$process_name" && "$process_name" != "nginx" ]] || continue
+        [[ "$seen_names" == *" ${process_name} "* ]] && continue
+        seen_names+="${process_name} "
+
+        matching_pids=""
+        for candidate in "${pids[@]}"; do
+            if [[ "$(ps -o comm= -p "$candidate" 2>/dev/null | awk '{$1=$1; print}')" == "$process_name" ]]; then
+                matching_pids+="${candidate} "
+            fi
+        done
+        warn "检测到 ${process_name}（PID: ${matching_pids})占用 80/443。"
+        if ask_yes_no "是否停止这些 ${process_name} 进程以释放 Web 端口？" "Y"; then
+            for candidate in "${pids[@]}"; do
+                if [[ "$(ps -o comm= -p "$candidate" 2>/dev/null | awk '{$1=$1; print}')" == "$process_name" ]]; then
+                    kill "$candidate" 2>/dev/null || true
+                fi
+            done
+            sleep 1
+            ok "已请求停止 ${process_name}，正在继续检查端口。"
+        else
+            warn "保留 ${process_name}；Nginx 可能无法启动，直到 80/443 端口被释放。"
+        fi
+    done
 }
 
 valid_port() {
@@ -741,9 +793,15 @@ restart_nginx_prompt() {
     warn "转发已写入配置，Nginx 将会重启以应用更改。"
     if ask_yes_no "是否现在重启 Nginx？" "Y"; then
         if command_exists systemctl; then
-            systemctl restart nginx
+            if ! systemctl restart nginx; then
+                err "Nginx 重启失败，请检查 80/443 端口占用：ss -ltnp。"
+                return 1
+            fi
         elif command_exists service; then
-            service nginx restart
+            if ! service nginx restart; then
+                err "Nginx 重启失败，请检查 80/443 端口占用：ss -ltnp。"
+                return 1
+            fi
         else
             die "找不到 systemctl/service，无法重启 Nginx。"
         fi
@@ -934,7 +992,7 @@ change_web_mode() {
     choice="$(prompt "1) 保留 Web 服务  2) 仅转发" "$default_choice")"
     case "$choice" in
         1) MODE="retain-web"; save_state; ok "已切换为保留 Web 服务。" ;;
-        2) MODE="relay-only"; disable_web_ports; save_state; ok "已切换为仅转发模式。" ;;
+        2) MODE="relay-only"; disable_web_ports; release_web_port_conflicts; save_state; ok "已切换为仅转发模式。" ;;
         *) warn "无效选项。" ;;
     esac
 }
@@ -949,6 +1007,9 @@ main() {
         select_mode_first_run
     fi
     ensure_stream_layout
+    if [[ "$MODE" == "relay-only" ]]; then
+        release_web_port_conflicts
+    fi
     if [[ ! -f "$RELAY_DB" ]]; then
         touch "$RELAY_DB"
         chmod 600 "$RELAY_DB"
