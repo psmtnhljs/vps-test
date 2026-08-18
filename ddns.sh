@@ -146,8 +146,11 @@ ask_yes_no() {
   esac
 }
 
-ensure_dependencies() {
+ensure_curl_dependency() {
   command -v curl >/dev/null 2>&1 || die "缺少 curl，请先安装。"
+}
+
+ensure_cron_dependency() {
   command -v crontab >/dev/null 2>&1 || die "缺少 crontab，请先安装 cron。"
 }
 
@@ -218,7 +221,8 @@ EOF
 }
 
 install_cron_job() {
-  ensure_dependencies
+  ensure_curl_dependency
+  ensure_cron_dependency
   ensure_state_dir
 
   [ -f "$CONFIG_FILE" ] || die "未找到配置文件，请先运行交互配置并保存。"
@@ -245,7 +249,7 @@ install_cron_job() {
 }
 
 remove_cron_job() {
-  ensure_dependencies
+  ensure_cron_dependency
   local tmp_file
   tmp_file="$(mktemp)"
   crontab -l 2>/dev/null | grep -v -F "# ddns.sh managed by script" > "$tmp_file" || :
@@ -304,10 +308,12 @@ cf_auth_mode() {
 }
 
 cf_curl() {
+  # Keep Cloudflare's JSON error response so update_dns can show a useful,
+  # non-sensitive diagnosis instead of exiting on HTTP 4xx/5xx.
   if [ "$(cf_auth_mode)" = "token" ]; then
-    curl -fsS -H "Authorization: Bearer $CFKEY" "$@"
+    curl -sS -H "Authorization: Bearer $CFKEY" "$@"
   else
-    curl -fsS -H "X-Auth-Email: $CFUSER" -H "X-Auth-Key: $CFKEY" "$@"
+    curl -sS -H "X-Auth-Email: $CFUSER" -H "X-Auth-Key: $CFKEY" "$@"
   fi
 }
 
@@ -322,10 +328,9 @@ read_cached_ids() {
   local lines=()
   mapfile -t lines < "$ID_FILE" || true
 
-  if [ "${#lines[@]}" -ge 4 ]; then
-    CFZONE_ID="${lines[0]}"
-    CFRECORD_ID="${lines[1]}"
-  elif [ "${#lines[@]}" -ge 2 ]; then
+  if [ "${#lines[@]}" -ge 4 ] \
+    && [ "${lines[2]}" = "$CFZONE_NAME" ] \
+    && [ "${lines[3]}" = "$CFRECORD_NAME" ]; then
     CFZONE_ID="${lines[0]}"
     CFRECORD_ID="${lines[1]}"
   fi
@@ -341,7 +346,9 @@ write_cached_ids() {
 }
 
 update_dns() {
-  ensure_dependencies
+  # Updating DNS only needs curl.  crontab is required by the optional
+  # install/remove cron actions, not by a one-shot update.
+  ensure_curl_dependency
   ensure_state_dir
   load_config
 
