@@ -23,6 +23,65 @@ log() {
   printf '%s\n' "$*"
 }
 
+if [ -t 1 ]; then
+  COLOR_RESET=$'\033[0m'
+  COLOR_TITLE=$'\033[1;36m'
+  COLOR_OK=$'\033[1;32m'
+  COLOR_WARN=$'\033[1;33m'
+  COLOR_ERROR=$'\033[1;31m'
+  COLOR_DIM=$'\033[2m'
+else
+  COLOR_RESET=""
+  COLOR_TITLE=""
+  COLOR_OK=""
+  COLOR_WARN=""
+  COLOR_ERROR=""
+  COLOR_DIM=""
+fi
+
+title() {
+  printf '\n%s== %s ==%s\n' "$COLOR_TITLE" "$1" "$COLOR_RESET"
+}
+
+success() {
+  printf '%s✓ %s%s\n' "$COLOR_OK" "$1" "$COLOR_RESET"
+}
+
+warning() {
+  printf '%s! %s%s\n' "$COLOR_WARN" "$1" "$COLOR_RESET"
+}
+
+mask_value() {
+  local value="${1:-}"
+  local visible="${2:-4}"
+  local length=${#value}
+  if [ -z "$value" ]; then
+    printf '%s' "未设置"
+  elif [ "$length" -le "$visible" ]; then
+    printf '%s' '********'
+  else
+    printf '%s...%s' "${value:0:2}" "${value: -$visible}"
+  fi
+}
+
+mask_email() {
+  local email="${1:-}"
+  case "$email" in
+    *@*)
+      local name="${email%@*}"
+      local domain="${email#*@}"
+      if [ "${#name}" -le 2 ]; then
+        printf '*@%s' "$domain"
+      else
+        printf '%s***@%s' "${name:0:1}" "$domain"
+      fi
+      ;;
+    *)
+      mask_value "$email" 4
+      ;;
+  esac
+}
+
 die() {
   log "$*"
   exit 1
@@ -197,10 +256,11 @@ remove_cron_job() {
 
 interactive_configure() {
   ensure_state_dir
-  log "Cloudflare DDNS 交互配置"
-  log "直接回车可保留已有值。"
+  title "Cloudflare DDNS 交互配置"
+  log "直接回车可保留已有值；API Key / Token 输入时不会回显。"
   log ""
 
+  title "Cloudflare 认证"
   CF_AUTH_MODE="$(prompt "认证方式 key/token" "${CF_AUTH_MODE:-key}")"
   case "$CF_AUTH_MODE" in
     key)
@@ -215,11 +275,13 @@ interactive_configure() {
       die "认证方式只能是 key 或 token。"
       ;;
   esac
+  title "DNS 记录"
   CFZONE_NAME="$(prompt "根域名 / Zone，例如 example.com" "${CFZONE_NAME:-}")"
   CFRECORD_NAME="$(prompt "要更新的主机名，例如 home.example.com 或 home" "${CFRECORD_NAME:-}")"
   CFRECORD_TYPE="$(prompt "记录类型 A/AAAA" "${CFRECORD_TYPE:-A}")"
   CFTTL="$(prompt "TTL（120-86400）" "${CFTTL:-120}")"
   FORCE="$(prompt "是否每次都强制更新 true/false" "${FORCE:-false}")"
+  title "定时任务"
   CRON_SCHEDULE="$(prompt "Cron 表达式，默认每 5 分钟执行一次" "${CRON_SCHEDULE:-*/5 * * * *}")"
   CRON_LOG_FILE="$(prompt "Cron 日志文件（留空则不记录）" "${CRON_LOG_FILE:-}")"
 
@@ -227,8 +289,7 @@ interactive_configure() {
   configure_wan_site
   save_config
 
-  log ""
-  log "配置已保存到：$CONFIG_FILE"
+  success "配置已保存到：$CONFIG_FILE"
 }
 
 fetch_wan_ip() {
@@ -328,12 +389,11 @@ update_dns() {
 
   if printf '%s' "$response" | grep -q '"success":true'; then
     printf '%s\n' "$wan_ip" > "$WAN_IP_FILE"
-    log "更新成功。"
+    success "更新成功。"
     return 0
   fi
 
-  log "更新失败，返回内容："
-  log "$response"
+  log "更新失败。"
   if printf '%s' "$response" | grep -q '"success":false'; then
     log "提示：如果这里是 403，通常表示认证方式不对，或者当前账号/Token 没有该 Zone 的 DNS 编辑权限。"
     log "建议："
@@ -345,31 +405,34 @@ update_dns() {
 }
 
 show_menu() {
-  echo
-  echo "Cloudflare DDNS 管理菜单"
-  echo "1) 交互式配置并立即更新"
-  echo "2) 手动执行一次更新"
-  echo "3) 安装/更新 crontab 任务"
-  echo "4) 移除 crontab 任务"
-  echo "5) 查看当前配置"
-  echo "0) 退出"
+  title "Cloudflare DDNS 管理菜单"
+  printf '  %s1%s  交互式配置并立即更新\n' "$COLOR_OK" "$COLOR_RESET"
+  printf '  %s2%s  手动执行一次更新\n' "$COLOR_OK" "$COLOR_RESET"
+  printf '  %s3%s  安装/更新 crontab 任务\n' "$COLOR_OK" "$COLOR_RESET"
+  printf '  %s4%s  移除 crontab 任务\n' "$COLOR_OK" "$COLOR_RESET"
+  printf '  %s5%s  查看当前配置（敏感信息已隐藏）\n' "$COLOR_OK" "$COLOR_RESET"
+  printf '  %s0%s  退出\n' "$COLOR_DIM" "$COLOR_RESET"
 }
 
 show_config() {
   load_config
-  echo
-  echo "当前配置："
-  printf '  CONFIG_FILE: %s\n' "$CONFIG_FILE"
-  printf '  CFUSER: %s\n' "${CFUSER:-}"
-  printf '  CF_AUTH_MODE: %s\n' "${CF_AUTH_MODE:-key}"
-  printf '  CFZONE_NAME: %s\n' "${CFZONE_NAME:-}"
-  printf '  CFRECORD_NAME: %s\n' "${CFRECORD_NAME:-}"
-  printf '  CFRECORD_TYPE: %s\n' "${CFRECORD_TYPE:-}"
-  printf '  CFTTL: %s\n' "${CFTTL:-}"
-  printf '  FORCE: %s\n' "${FORCE:-}"
-  printf '  CRON_SCHEDULE: %s\n' "${CRON_SCHEDULE:-}"
-  printf '  CRON_LOG_FILE: %s\n' "${CRON_LOG_FILE:-}"
-  printf '  STATE_DIR: %s\n' "$STATE_DIR"
+  title "当前配置（敏感信息已隐藏）"
+  printf '  认证方式     : %s\n' "${CF_AUTH_MODE:-key}"
+  if [ "$(cf_auth_mode)" = "key" ]; then
+    printf '  API Key      : %s\n' "$(mask_value "${CFKEY:-}")"
+    printf '  Cloudflare 邮箱: %s\n' "$(mask_email "${CFUSER:-}")"
+  else
+    printf '  API Token    : %s\n' "$(mask_value "${CFKEY:-}")"
+  fi
+  printf '  Zone         : %s\n' "${CFZONE_NAME:-未设置}"
+  printf '  DNS 记录     : %s\n' "${CFRECORD_NAME:-未设置}"
+  printf '  记录类型     : %s\n' "${CFRECORD_TYPE:-A}"
+  printf '  TTL          : %s\n' "${CFTTL:-120}"
+  printf '  强制更新     : %s\n' "${FORCE:-false}"
+  printf '  Cron 计划    : %s\n' "${CRON_SCHEDULE:-未设置}"
+  printf '  Cron 日志    : %s\n' "${CRON_LOG_FILE:-未记录}"
+  printf '  配置文件     : %s\n' "$CONFIG_FILE"
+  printf '  状态目录     : %s\n' "$STATE_DIR"
 }
 
 parse_legacy_args() {
