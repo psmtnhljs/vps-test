@@ -9,6 +9,7 @@ ID_FILE="${STATE_DIR}/record_id.txt"
 
 CFKEY=""
 CFUSER=""
+CF_AUTH_MODE="key"
 CFZONE_NAME=""
 CFRECORD_NAME=""
 CFRECORD_TYPE="A"
@@ -108,6 +109,7 @@ save_config() {
   cat > "$CONFIG_FILE" <<EOF
 CFKEY=$(printf '%q' "$CFKEY")
 CFUSER=$(printf '%q' "$CFUSER")
+CF_AUTH_MODE=$(printf '%q' "$CF_AUTH_MODE")
 CFZONE_NAME=$(printf '%q' "$CFZONE_NAME")
 CFRECORD_NAME=$(printf '%q' "$CFRECORD_NAME")
 CFRECORD_TYPE=$(printf '%q' "$CFRECORD_TYPE")
@@ -149,6 +151,7 @@ Usage:
 
 Old flags are still supported:
   -k <api-key> -u <email> -h <host> -z <zone> -t <A|AAAA> -f <true|false>
+  --auth <key|token>
 
 Interactive mode will guide you through configuration and save it to:
   $CONFIG_FILE
@@ -198,8 +201,20 @@ interactive_configure() {
   log "直接回车可保留已有值。"
   log ""
 
-  CFKEY="$(prompt_secret "Cloudflare Global API Key" "${CFKEY:-}")"
-  CFUSER="$(prompt "Cloudflare 邮箱" "${CFUSER:-}")"
+  CF_AUTH_MODE="$(prompt "认证方式 key/token" "${CF_AUTH_MODE:-key}")"
+  case "$CF_AUTH_MODE" in
+    key)
+      CFKEY="$(prompt_secret "Cloudflare Global API Key" "${CFKEY:-}")"
+      CFUSER="$(prompt "Cloudflare 邮箱" "${CFUSER:-}")"
+      ;;
+    token)
+      CFKEY="$(prompt_secret "Cloudflare API Token" "${CFKEY:-}")"
+      CFUSER=""
+      ;;
+    *)
+      die "认证方式只能是 key 或 token。"
+      ;;
+  esac
   CFZONE_NAME="$(prompt "根域名 / Zone，例如 example.com" "${CFZONE_NAME:-}")"
   CFRECORD_NAME="$(prompt "要更新的主机名，例如 home.example.com 或 home" "${CFRECORD_NAME:-}")"
   CFRECORD_TYPE="$(prompt "记录类型 A/AAAA" "${CFRECORD_TYPE:-A}")"
@@ -218,6 +233,21 @@ interactive_configure() {
 
 fetch_wan_ip() {
   curl -fsS "$WANIPSITE" | tr -d '[:space:]'
+}
+
+cf_auth_mode() {
+  case "${CF_AUTH_MODE:-key}" in
+    token) printf '%s' "token" ;;
+    *) printf '%s' "key" ;;
+  esac
+}
+
+cf_curl() {
+  if [ "$(cf_auth_mode)" = "token" ]; then
+    curl -fsS -H "Authorization: Bearer $CFKEY" "$@"
+  else
+    curl -fsS -H "X-Auth-Email: $CFUSER" -H "X-Auth-Key: $CFKEY" "$@"
+  fi
 }
 
 read_cached_ids() {
@@ -257,8 +287,10 @@ update_dns() {
   normalize_record_name
   configure_wan_site
 
-  [ -n "${CFKEY:-}" ] || die "缺少 Cloudflare API Key。"
-  [ -n "${CFUSER:-}" ] || die "缺少 Cloudflare 邮箱。"
+  [ -n "${CFKEY:-}" ] || die "缺少 Cloudflare 凭据。"
+  if [ "$(cf_auth_mode)" = "key" ]; then
+    [ -n "${CFUSER:-}" ] || die "Global API Key 模式下还需要 Cloudflare 邮箱。"
+  fi
   [ -n "${CFZONE_NAME:-}" ] || die "缺少 Zone 域名。"
   [ -n "${CFRECORD_NAME:-}" ] || die "缺少记录主机名。"
 
@@ -278,14 +310,10 @@ update_dns() {
   read_cached_ids
   if [ -z "${CFZONE_ID:-}" ] || [ -z "${CFRECORD_ID:-}" ]; then
     log "正在查询 Cloudflare zone 与 record ID..."
-    CFZONE_ID="$(curl -fsS -X GET "https://api.cloudflare.com/client/v4/zones?name=$CFZONE_NAME" \
-      -H "X-Auth-Email: $CFUSER" \
-      -H "X-Auth-Key: $CFKEY" \
+    CFZONE_ID="$(cf_curl -X GET "https://api.cloudflare.com/client/v4/zones?name=$CFZONE_NAME" \
       -H "Content-Type: application/json" | grep -Po '(?<="id":")[^"]*' | head -1)"
 
-    CFRECORD_ID="$(curl -fsS -X GET "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records?name=$CFRECORD_NAME" \
-      -H "X-Auth-Email: $CFUSER" \
-      -H "X-Auth-Key: $CFKEY" \
+    CFRECORD_ID="$(cf_curl -X GET "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records?name=$CFRECORD_NAME" \
       -H "Content-Type: application/json" | grep -Po '(?<="id":")[^"]*' | head -1)"
 
     [ -n "$CFZONE_ID" ] || die "未找到对应的 zone ID。"
@@ -294,9 +322,7 @@ update_dns() {
   fi
 
   log "更新 DNS：$CFRECORD_NAME -> $wan_ip"
-  response="$(curl -fsS -X PUT "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records/$CFRECORD_ID" \
-    -H "X-Auth-Email: $CFUSER" \
-    -H "X-Auth-Key: $CFKEY" \
+  response="$(cf_curl -X PUT "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records/$CFRECORD_ID" \
     -H "Content-Type: application/json" \
     --data "{\"id\":\"$CFZONE_ID\",\"type\":\"$CFRECORD_TYPE\",\"name\":\"$CFRECORD_NAME\",\"content\":\"$wan_ip\",\"ttl\":$CFTTL}")"
 
@@ -308,6 +334,13 @@ update_dns() {
 
   log "更新失败，返回内容："
   log "$response"
+  if printf '%s' "$response" | grep -q '"success":false'; then
+    log "提示：如果这里是 403，通常表示认证方式不对，或者当前账号/Token 没有该 Zone 的 DNS 编辑权限。"
+    log "建议："
+    log "  1) 如果你填的是 API Token，请在交互配置里选 token。"
+    log "  2) 如果你填的是 Global API Key，请确认邮箱和 key 都正确。"
+    log "  3) Token 需要至少有 Zone:Read 和 DNS:Edit 权限，并且作用范围要包含 $CFZONE_NAME。"
+  fi
   return 1
 }
 
@@ -328,6 +361,7 @@ show_config() {
   echo "当前配置："
   printf '  CONFIG_FILE: %s\n' "$CONFIG_FILE"
   printf '  CFUSER: %s\n' "${CFUSER:-}"
+  printf '  CF_AUTH_MODE: %s\n' "${CF_AUTH_MODE:-key}"
   printf '  CFZONE_NAME: %s\n' "${CFZONE_NAME:-}"
   printf '  CFRECORD_NAME: %s\n' "${CFRECORD_NAME:-}"
   printf '  CFRECORD_TYPE: %s\n' "${CFRECORD_TYPE:-}"
@@ -364,6 +398,14 @@ parse_legacy_args() {
       -f)
         FORCE="${2:-true}"
         shift 2
+        ;;
+      --auth)
+        CF_AUTH_MODE="${2:-$CF_AUTH_MODE}"
+        shift 2
+        ;;
+      --auth=*)
+        CF_AUTH_MODE="${1#--auth=}"
+        shift
         ;;
       --force)
         FORCE="true"
