@@ -34,6 +34,10 @@ HAS_PUBLIC_IPV4=0
 HAS_PRIVATE_IPV4=0
 HAS_PUBLIC_IPV6=0
 HAS_PRIVATE_IPV6=0
+PUBLIC_EGRESS_IPV4=""
+PUBLIC_EGRESS_IPV6=""
+HAS_EGRESS_IPV4=0
+HAS_EGRESS_IPV6=0
 SELECTED_BIND_IP=""
 SELECTED_FAMILY=""
 SELECTED_PROTOCOL=""
@@ -201,6 +205,33 @@ is_private_address() {
     esac
 }
 
+detect_public_egress_ip() {
+    local family="$1" value=""
+    if ! command_exists curl && ! command_exists wget; then
+        return 1
+    fi
+
+    if command_exists curl; then
+        if [[ "$family" == "4" ]]; then
+            value="$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+        else
+            value="$(curl -6fsS --max-time 5 https://api6.ipify.org 2>/dev/null || true)"
+        fi
+    else
+        value="$(wget -qO- -T 5 "https://api${family}.ipify.org" 2>/dev/null || true)"
+    fi
+    value="$(trim "$value")"
+    if [[ "$family" == "4" ]] && is_ipv4 "$value"; then
+        printf '%s' "$value"
+        return 0
+    fi
+    if [[ "$family" == "6" ]] && is_ipv6 "$value"; then
+        printf '%s' "$value"
+        return 0
+    fi
+    return 1
+}
+
 ip_family() {
     local ip="$1"
     if is_ipv4 "$ip"; then
@@ -253,6 +284,17 @@ refresh_ip_status() {
     [[ ${#LOCAL_PRIVATE_IPV4[@]} -gt 0 ]] && HAS_PRIVATE_IPV4=1 || HAS_PRIVATE_IPV4=0
     [[ ${#LOCAL_PUBLIC_IPV6[@]} -gt 0 ]] && HAS_PUBLIC_IPV6=1 || HAS_PUBLIC_IPV6=0
     [[ ${#LOCAL_PRIVATE_IPV6[@]} -gt 0 ]] && HAS_PRIVATE_IPV6=1 || HAS_PRIVATE_IPV6=0
+
+    PUBLIC_EGRESS_IPV4="${LOCAL_PUBLIC_IPV4[0]:-}"
+    PUBLIC_EGRESS_IPV6="${LOCAL_PUBLIC_IPV6[0]:-}"
+    if [[ -z "$PUBLIC_EGRESS_IPV4" ]]; then
+        PUBLIC_EGRESS_IPV4="$(detect_public_egress_ip 4 || true)"
+    fi
+    if [[ -z "$PUBLIC_EGRESS_IPV6" ]]; then
+        PUBLIC_EGRESS_IPV6="$(detect_public_egress_ip 6 || true)"
+    fi
+    [[ -n "$PUBLIC_EGRESS_IPV4" ]] && HAS_EGRESS_IPV4=1 || HAS_EGRESS_IPV4=0
+    [[ -n "$PUBLIC_EGRESS_IPV6" ]] && HAS_EGRESS_IPV6=1 || HAS_EGRESS_IPV6=0
 }
 
 show_ip_status() {
@@ -271,12 +313,16 @@ show_ip_status() {
 
     if (( HAS_PUBLIC_IPV4 == 1 )); then
         printf '  IPv4 外网地址：%s\n' "${LOCAL_PUBLIC_IPV4[*]}"
+    elif (( HAS_EGRESS_IPV4 == 1 )); then
+        printf '  IPv4 公网出口地址（NAT，仅用于显示）：%s\n' "$PUBLIC_EGRESS_IPV4"
     fi
     if (( HAS_PRIVATE_IPV4 == 1 )); then
         printf '  IPv4 内网地址：%s\n' "${LOCAL_PRIVATE_IPV4[*]}"
     fi
     if (( HAS_PUBLIC_IPV6 == 1 )); then
         printf '  IPv6 外网地址：%s\n' "${LOCAL_PUBLIC_IPV6[*]}"
+    elif (( HAS_EGRESS_IPV6 == 1 )); then
+        printf '  IPv6 公网出口地址（NAT，仅用于显示）：%s\n' "$PUBLIC_EGRESS_IPV6"
     fi
     if (( HAS_PRIVATE_IPV6 == 1 )); then
         printf '  IPv6 内网地址：%s\n' "${LOCAL_PRIVATE_IPV6[*]}"
@@ -616,7 +662,7 @@ choose_protocol() {
 
 choose_family_for_domain() {
     local value
-    if (( HAS_PUBLIC_IPV4 == 1 && HAS_PUBLIC_IPV6 == 1 )); then
+    if (( HAS_EGRESS_IPV4 == 1 && HAS_EGRESS_IPV6 == 1 )); then
         while true; do
             value="$(prompt "目标地址族 1) IPv4  2) IPv6" "1")"
             case "$value" in
@@ -625,10 +671,10 @@ choose_family_for_domain() {
                 *) warn "请输入 1 或 2。" ;;
             esac
         done
-    elif (( HAS_PUBLIC_IPV4 == 1 )); then
+    elif (( HAS_EGRESS_IPV4 == 1 )); then
         SELECTED_FAMILY="4"
         info "当前可用外网地址为 IPv4，域名转发默认使用 IPv4。"
-    elif (( HAS_PUBLIC_IPV6 == 1 )); then
+    elif (( HAS_EGRESS_IPV6 == 1 )); then
         SELECTED_FAMILY="6"
         info "当前可用外网地址为 IPv6，域名转发默认使用 IPv6。"
     else
@@ -639,23 +685,36 @@ choose_family_for_domain() {
 choose_bind_ip() {
     local family="$1"
     local scope="${2:-public}"
-    local array_name
+    local array_name nat_fallback=0
     if [[ "$scope" == "private" && "$family" == "4" ]]; then
         array_name="LOCAL_PRIVATE_IPV4"
     elif [[ "$scope" == "private" && "$family" == "6" ]]; then
         array_name="LOCAL_PRIVATE_IPV6"
     elif [[ "$scope" == "public" && "$family" == "4" ]]; then
-        array_name="LOCAL_PUBLIC_IPV4"
+        if (( HAS_PUBLIC_IPV4 == 1 )); then
+            array_name="LOCAL_PUBLIC_IPV4"
+        else
+            array_name="LOCAL_PRIVATE_IPV4"
+            nat_fallback=1
+        fi
     elif [[ "$scope" == "public" && "$family" == "6" ]]; then
-        array_name="LOCAL_PUBLIC_IPV6"
+        if (( HAS_PUBLIC_IPV6 == 1 )); then
+            array_name="LOCAL_PUBLIC_IPV6"
+        else
+            array_name="LOCAL_PRIVATE_IPV6"
+            nat_fallback=1
+        fi
     else
         die "无效的地址族或地址范围。"
     fi
 
     local -n candidates="$array_name"
-    (( ${#candidates[@]} > 0 )) || die "没有可用的 IPv${family} 出站地址。"
+    (( ${#candidates[@]} > 0 )) || die "没有可用的 IPv${family} 本地绑定地址。"
     msg ""
-    if [[ "$scope" == "private" ]]; then
+    if (( nat_fallback == 1 )); then
+        warn "检测到 NAT 出口：公网 IP 不在本机网卡上，proxy_bind 将使用本机内网地址，由上游 NAT 转换。"
+        msg "可用的 IPv${family} 本地绑定地址："
+    elif [[ "$scope" == "private" ]]; then
         msg "可用的 IPv${family} 内网出站地址："
     else
         msg "可用的 IPv${family} 外网出站地址："
@@ -824,11 +883,11 @@ create_static_relay() {
     if is_private_address "$target"; then
         die "目标 IP 属于内网地址，请使用‘创建内网 IP 转发’菜单。"
     fi
-    if [[ "$family" == "4" && "$HAS_PUBLIC_IPV4" -ne 1 ]]; then
-        die "当前服务器没有外网 IPv4，不能创建外网 IPv4 转发。"
+    if [[ "$family" == "4" && "$HAS_EGRESS_IPV4" -ne 1 ]]; then
+        die "当前服务器没有可用的 IPv4 公网出口，不能创建外网 IPv4 转发。"
     fi
-    if [[ "$family" == "6" && "$HAS_PUBLIC_IPV6" -ne 1 ]]; then
-        die "当前服务器没有外网 IPv6，不能创建外网 IPv6 转发。"
+    if [[ "$family" == "6" && "$HAS_EGRESS_IPV6" -ne 1 ]]; then
+        die "当前服务器没有可用的 IPv6 公网出口，不能创建外网 IPv6 转发。"
     fi
 
     listen_port="$(prompt "本地监听端口")"
