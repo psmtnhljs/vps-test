@@ -65,13 +65,14 @@ wget -O fail2ban-sshctl.sh https://raw.githubusercontent.com/psmtnhljs/vps-test/
 sudo bash nginx-relay.sh
 ```
 
-首次运行会检测服务器是 IPv4、IPv6 还是双栈，安装 Nginx 及 stream 模块，并让你选择保留 Web 服务或释放 80/443 端口、仅用于转发。工作模式会被保存，之后再次运行时默认跳过一级模式选择和重复安装。
+首次运行会检测服务器是 IPv4、IPv6 还是双栈，安装 Nginx 及 stream 模块，并将 `/etc/nginx/nginx.conf` 备份后改为纯 stream 配置。纯 stream 配置只加载转发规则，不加载 HTTP 配置，因此不会占用 80/443，也不会与 Caddy、Apache 等 Web 服务冲突。
 
 二级菜单支持：
 
 - 查看当前转发列表
 - 创建静态 IPv4/IPv6 转发
 - 创建域名或 DDNS 转发
+- 创建内网 IP 转发（仅允许内网目标地址）
 - 删除转发
 - 测试 Nginx 配置并重启
 - 重新设置 Web 服务模式
@@ -86,7 +87,7 @@ sudo bash nginx-relay.sh
 
 每次新增或删除转发后，脚本会先执行 `nginx -t`。配置测试通过后，是否立即重启 Nginx 由用户确认。
 
-脚本生成的文件通常位于：
+脚本会备份原始主配置，并生成纯 stream 主配置。备份和转发文件通常位于：
 
 ```text
 /etc/nginx/stream.d/nginx-relay.conf
@@ -152,8 +153,8 @@ bash tk.sh -I eth0
 
 - 这些脚本会修改系统服务、网络配置或防火墙相关配置，建议先在测试 VPS 验证。
 - `root.sh`、`delete.sh`、`uninstall-xmr.sh` 和 `nginx-relay.sh` 可能影响现有服务，请确认目标机器和配置后再执行。
-- “仅转发”模式会尝试注释 Nginx 配置中的 80/443 `listen` 指令，并在 `/etc/nginx/nginx-relay-backups/` 保存备份。
-- “仅转发”模式还会检测 Caddy、Apache 等其他进程是否占用 80/443，并在停止前向用户确认。
+- 脚本会把原始 `/etc/nginx/nginx.conf` 备份到 `/etc/nginx/nginx-relay-backups/`，然后生成只包含 stream 的主配置。
+- 原有 HTTP、80/443 和其他 Web 配置不再由 Nginx 加载；如需恢复，可使用备份文件手动还原。
 - 动态域名转发依赖 Nginx 的变量 `proxy_pass` 和 DNS 解析；请确认目标域名及目标端口可用。
 - 不要把 Cloudflare API Key、SSH 私钥或其他凭据写入仓库。
 

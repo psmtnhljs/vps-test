@@ -447,53 +447,57 @@ ensure_stream_layout() {
     [[ -f "$NGINX_CONF" ]] || die "找不到 Nginx 主配置：${NGINX_CONF}"
     mkdir -p "$RELAY_DIR"
 
-    local module_path
-    # --with-stream=dynamic 仍然需要在配置中加载 .so，不能当作静态编译处理。
-    if nginx_stream_is_dynamic || ! nginx_has_stream; then
-        module_path="$(find_stream_module || true)"
-        if [[ -n "$module_path" ]]; then
-            ensure_stream_module_loaded "$module_path"
-        elif ! nginx_has_stream; then
-            die "未找到 ngx_stream_module.so，请先安装 Nginx stream 模块。"
-        fi
+    local module_path nginx_user tmp
+    STREAM_INCLUDE_MODE="standalone"
+
+    # 纯 stream 模式：移除 HTTP 配置，避免其他 Web 服务占用 80/443 时影响 Nginx 启动。
+    if grep -qF '# nginx-relay.sh stream-only configuration' "$NGINX_CONF"; then
+        return 0
     fi
 
-    if grep -Eq '^[[:space:]]*stream[[:space:]]*\{' "$NGINX_CONF"; then
-        STREAM_INCLUDE_MODE="inside-stream"
-        if ! grep -Eq '^[[:space:]]*include[[:space:]]+/etc/nginx/stream\.d/\*\.conf;' "$NGINX_CONF"; then
-            backup_file "$NGINX_CONF"
-            sed -i "/^[[:space:]]*stream[[:space:]]*{/a\\    include ${STREAM_INCLUDE};" "$NGINX_CONF"
-            info "已将转发配置接入现有 stream 块。"
-        fi
-    else
-        STREAM_INCLUDE_MODE="standalone"
-        if ! grep -Eq '^[[:space:]]*include[[:space:]]+/etc/nginx/stream\.d/\*\.conf;' "$NGINX_CONF"; then
-            backup_file "$NGINX_CONF"
-            printf '\n# nginx-relay.sh managed include\ninclude %s;\n' "$STREAM_INCLUDE" >> "$NGINX_CONF"
-            info "已将转发配置接入 Nginx 主配置。"
-        fi
+    module_path="$(find_stream_module || true)"
+    if nginx_stream_is_dynamic; then
+        [[ -n "$module_path" ]] || die "未找到 ngx_stream_module.so，请先安装 Nginx stream 模块。"
+    elif ! nginx_has_stream && [[ -z "$module_path" ]]; then
+        die "未找到 Nginx stream 模块，请先安装后重新运行。"
     fi
+
+    nginx_user="$(sed -n 's/^[[:space:]]*user[[:space:]]\+\([^;[:space:]]*\).*/\1/p' "$NGINX_CONF" | head -n 1)"
+    [[ -n "$nginx_user" ]] || nginx_user="www-data"
+    tmp="${NGINX_CONF}.stream-only.tmp.$$"
+    backup_file "$NGINX_CONF"
+    {
+        printf '# nginx-relay.sh stream-only configuration\n'
+        printf '# The original nginx.conf is backed up in %s\n\n' "$BACKUP_DIR"
+        if nginx_stream_is_dynamic; then
+            printf 'load_module %s;\n\n' "$module_path"
+        fi
+        printf 'user %s;\n' "$nginx_user"
+        printf 'worker_processes auto;\n'
+        printf 'pid /run/nginx.pid;\n\n'
+        printf 'events {\n    worker_connections 5120;\n}\n\n'
+        printf 'include %s;\n' "$STREAM_INCLUDE"
+    } > "$tmp"
+    mv "$tmp" "$NGINX_CONF"
+    info "已生成纯 stream Nginx 主配置，HTTP/80/443 配置不再加载。"
+}
+
+ensure_stream_layout_legacy() {
+    # 保留旧函数名，避免旧状态或外部调用时报错。
+    ensure_stream_layout
 }
 
 select_mode_first_run() {
     msg ""
-    msg "首次运行请选择 Nginx 工作模式："
-    msg "1) 保留 Web 服务"
-    msg "   - 不修改现有 80/443 配置，仅增加 stream 转发"
-    msg "2) 不保留 Web 服务（仅转发）"
-    msg "   - 备份后注释 Nginx 配置中的 80/443 listen，占用端口将被释放"
+    msg "首次运行将配置为纯 stream 转发模式："
+    msg "   - 备份原 nginx.conf，仅加载 stream 转发配置"
+    msg "   - 不加载 HTTP 配置，不占用 80/443"
     local choice
     while true; do
-        choice="$(prompt "请选择 [1-2]" "1")"
+        choice="$(prompt "请输入 1 确认" "1")"
         case "$choice" in
-            1) MODE="retain-web"; break ;;
-            2)
-                MODE="relay-only"
-                disable_web_ports
-                release_web_port_conflicts
-                break
-                ;;
-            *) warn "请输入 1 或 2。" ;;
+            1) MODE="stream-only"; break ;;
+            *) warn "请输入 1 确认。" ;;
         esac
     done
     save_state
@@ -980,7 +984,6 @@ show_menu() {
     msg "4) 创建内网 IP 转发（仅内网目标）"
     msg "5) 删除转发"
     msg "6) 测试配置并重启 Nginx"
-    msg "7) 重新执行‘是否保留 Web 服务’设置"
     msg "0) 退出"
 }
 
@@ -991,9 +994,8 @@ change_web_mode() {
     [[ "$MODE" == "retain-web" ]] && default_choice="1"
     choice="$(prompt "1) 保留 Web 服务  2) 仅转发" "$default_choice")"
     case "$choice" in
-        1) MODE="retain-web"; save_state; ok "已切换为保留 Web 服务。" ;;
-        2) MODE="relay-only"; disable_web_ports; release_web_port_conflicts; save_state; ok "已切换为仅转发模式。" ;;
-        *) warn "无效选项。" ;;
+        1|2) MODE="stream-only"; save_state; ok "当前固定为纯 stream 转发模式。" ;;
+        *) warn "纯 stream 转发模式不提供 Web 服务保留选项。" ;;
     esac
 }
 
@@ -1003,13 +1005,11 @@ main() {
     show_ip_status
     ensure_nginx_ready
 
-    if [[ -z "$MODE" ]]; then
-        select_mode_first_run
+    if [[ "$MODE" != "stream-only" ]]; then
+        MODE="stream-only"
+        save_state
     fi
     ensure_stream_layout
-    if [[ "$MODE" == "relay-only" ]]; then
-        release_web_port_conflicts
-    fi
     if [[ ! -f "$RELAY_DB" ]]; then
         touch "$RELAY_DB"
         chmod 600 "$RELAY_DB"
@@ -1030,7 +1030,6 @@ main() {
             4) create_internal_relay ;;
             5) delete_relay ;;
             6) check_and_restart ;;
-            7) change_web_mode ;;
             0) info "已退出。"; exit 0 ;;
             *) warn "无效选项，请重新输入。" ;;
         esac
