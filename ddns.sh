@@ -189,6 +189,7 @@ FORCE=$(printf '%q' "$FORCE")
 CRON_SCHEDULE=$(printf '%q' "$CRON_SCHEDULE")
 CRON_LOG_FILE=$(printf '%q' "$CRON_LOG_FILE")
 EOF
+  chmod 600 "$CONFIG_FILE"
 }
 
 configure_wan_site() {
@@ -326,6 +327,27 @@ cf_curl() {
   fi
 }
 
+api_response_failed() {
+  printf '%s' "$1" | grep -Eq '"success"[[:space:]]*:[[:space:]]*false'
+}
+
+extract_first_id() {
+  local json="$1"
+  local id=""
+
+  if command -v jq >/dev/null 2>&1; then
+    id="$(printf '%s' "$json" | jq -r '.result[0].id // empty' 2>/dev/null || true)"
+  fi
+
+  if [ -z "$id" ]; then
+    # Fallback for systems without jq; unlike grep -P this works with
+    # standard sed implementations and tolerates spaces around the colon.
+    id="$(printf '%s' "$json" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1 || true)"
+  fi
+
+  printf '%s' "$id"
+}
+
 read_cached_ids() {
   CFZONE_ID=""
   CFRECORD_ID=""
@@ -393,14 +415,20 @@ update_dns() {
       -H "Content-Type: application/json")"; then
       die "查询 Cloudflare Zone 失败，请检查网络连接。"
     fi
-    CFZONE_ID="$(printf '%s' "$zone_response" | grep -Po '(?<="id":")[^"]*' | head -1 || true)"
+    if api_response_failed "$zone_response"; then
+      die "Cloudflare Zone 查询失败，请检查 API Key、邮箱和 Zone 权限。"
+    fi
+    CFZONE_ID="$(extract_first_id "$zone_response")"
     [ -n "$CFZONE_ID" ] || die "未找到对应的 Zone ID，请检查认证信息和 Zone 配置。"
 
     if ! record_response="$(cf_curl -X GET "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records?name=$CFRECORD_NAME" \
       -H "Content-Type: application/json")"; then
       die "查询 Cloudflare DNS 记录失败，请检查网络连接。"
     fi
-    CFRECORD_ID="$(printf '%s' "$record_response" | grep -Po '(?<="id":")[^"]*' | head -1 || true)"
+    if api_response_failed "$record_response"; then
+      die "Cloudflare DNS 记录查询失败，请检查 API 权限和记录配置。"
+    fi
+    CFRECORD_ID="$(extract_first_id "$record_response")"
     [ -n "$CFRECORD_ID" ] || die "未找到对应的 DNS 记录，请检查记录配置。"
     write_cached_ids
   fi

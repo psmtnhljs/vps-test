@@ -113,14 +113,62 @@ sudo bash uninstall-xmr.sh
 
 ### `ddns.sh`
 
-首次运行按提示配置 Cloudflare API Key、邮箱、Zone、主机名、记录类型和定时任务。也支持旧的命令行参数：
+用于通过 Cloudflare API 自动更新动态 DNS 记录，支持 IPv4（A）和 IPv6（AAAA）。单次更新只需要 `curl`，安装或移除定时任务时才需要 `crontab`。
+
+#### 首次配置
+
+直接运行脚本进入交互菜单：
+
+```bash
+bash ddns.sh
+```
+
+选择“交互式配置并立即更新”，按提示填写：
+
+- 认证方式：`key`（Global API Key）或 `token`（API Token）
+- Cloudflare Global API Key + 账号邮箱，或 Cloudflare API Token
+- Zone 根域名、DNS 主机名、记录类型和 TTL
+- 是否强制更新，以及可选的 Cron 表达式和日志文件
+
+已保存的邮箱、域名和主机名不会在提示的默认值中显示；直接回车仍会保留已有配置。凭据保存在当前用户目录下的 `~/.ddns-cloudflare.conf`，脚本会以仅当前用户可读的权限保存，不要将该文件提交到 Git 仓库。
+
+API Token 至少需要 `Zone:Read` 和 `DNS:Edit` 权限，作用范围必须包含目标 Zone。使用 Global API Key 时还必须填写对应邮箱。
+
+#### 命令行用法
+
+使用已保存配置执行一次更新：
+
+```bash
+bash ddns.sh --run
+```
+
+首次使用也可以通过命令行直接传入配置：
 
 ```bash
 bash ddns.sh -k <api-key> -u <email> -h <host.example.com> -z <example.com> -t A
 bash ddns.sh -k <api-key> -u <email> -h <host.example.com> -z <example.com> -t AAAA
+bash ddns.sh -k <api-token> -h <host.example.com> -z <example.com> -t A --auth token
 ```
 
-其他可用参数包括 `--install-cron`、`--remove-cron` 和 `--show-config`。Cloudflare 凭据请勿提交到 Git 仓库。
+可用管理命令：
+
+```bash
+bash ddns.sh --show-config       # 查看配置摘要，敏感值会隐藏
+bash ddns.sh --install-cron      # 安装或更新 Cron 任务
+bash ddns.sh --remove-cron       # 移除脚本创建的 Cron 任务
+bash ddns.sh --help
+```
+
+默认配置文件为 `~/.ddns-cloudflare.conf`，缓存的 Zone/Record ID 和上次公网 IP 位于 `~/.ddns-cloudflare/`。如需使用其他配置文件，可添加 `--config /path/to/config`。
+
+#### 常见问题
+
+- `未找到对应的 Zone ID`：检查认证方式是否选对、API Key/Token 是否有效，以及填写的是 Cloudflare Zone 根域名。
+- `Cloudflare Zone 查询失败`：通常是邮箱、Global API Key 或 Token 权限不匹配；不要把 API 响应或凭据贴到公开渠道。
+- `缺少 crontab`：手动执行 `--run` 不需要 Cron；只有 `--install-cron` 或 `--remove-cron` 需要安装 cron/crontab。
+- 脚本会校验缓存 ID 对应的 Zone 和 DNS 主机名；修改域名后会自动重新查询，不会继续使用旧记录 ID。
+
+Cloudflare 凭据只应通过交互输入或本地私有配置提供，绝不要写入仓库、命令历史、截图或公开日志。
 
 ### `root.sh`
 
