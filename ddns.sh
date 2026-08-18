@@ -53,33 +53,27 @@ warning() {
 
 mask_value() {
   local value="${1:-}"
-  local visible="${2:-4}"
-  local length=${#value}
   if [ -z "$value" ]; then
     printf '%s' "未设置"
-  elif [ "$length" -le "$visible" ]; then
-    printf '%s' '********'
   else
-    printf '%s...%s' "${value:0:2}" "${value: -$visible}"
+    printf '%s' '已设置（已隐藏）'
   fi
 }
 
 mask_email() {
-  local email="${1:-}"
-  case "$email" in
-    *@*)
-      local name="${email%@*}"
-      local domain="${email#*@}"
-      if [ "${#name}" -le 2 ]; then
-        printf '*@%s' "$domain"
-      else
-        printf '%s***@%s' "${name:0:1}" "$domain"
-      fi
-      ;;
-    *)
-      mask_value "$email" 4
-      ;;
-  esac
+  if [ -n "${1:-}" ]; then
+    printf '%s' '已设置（已隐藏）'
+  else
+    printf '%s' '未设置'
+  fi
+}
+
+mask_private() {
+  if [ -n "${1:-}" ]; then
+    printf '%s' '已设置（已隐藏）'
+  else
+    printf '%s' '未设置'
+  fi
 }
 
 die() {
@@ -108,6 +102,21 @@ prompt() {
     reply="$(trim "$reply")"
   fi
 
+  printf '%s' "$reply"
+}
+
+prompt_private() {
+  local message="$1"
+  local default="${2:-}"
+  local reply=""
+
+  if [ -n "$default" ]; then
+    read -r -p "${message} [已设置，回车保留]: " reply
+  else
+    read -r -p "${message} [未设置]: " reply
+  fi
+  reply="$(trim "$reply")"
+  [ -n "$reply" ] || reply="$default"
   printf '%s' "$reply"
 }
 
@@ -193,7 +202,7 @@ configure_wan_site() {
 normalize_record_name() {
   if [ -n "$CFZONE_NAME" ] && [ "$CFRECORD_NAME" != "$CFZONE_NAME" ] && ! [ -z "${CFRECORD_NAME##*$CFZONE_NAME}" ]; then
     CFRECORD_NAME="$CFRECORD_NAME.$CFZONE_NAME"
-    log "=> 主机名不是完整 FQDN，已自动补全为：$CFRECORD_NAME"
+    log "=> 主机名不是完整 FQDN，已自动补全（主机名已隐藏）"
   fi
 }
 
@@ -269,7 +278,7 @@ interactive_configure() {
   case "$CF_AUTH_MODE" in
     key)
       CFKEY="$(prompt_secret "Cloudflare Global API Key" "${CFKEY:-}")"
-      CFUSER="$(prompt "Cloudflare 邮箱" "${CFUSER:-}")"
+      CFUSER="$(prompt_private "Cloudflare 邮箱" "${CFUSER:-}")"
       ;;
     token)
       CFKEY="$(prompt_secret "Cloudflare API Token" "${CFKEY:-}")"
@@ -280,14 +289,14 @@ interactive_configure() {
       ;;
   esac
   title "DNS 记录"
-  CFZONE_NAME="$(prompt "根域名 / Zone，例如 example.com" "${CFZONE_NAME:-}")"
-  CFRECORD_NAME="$(prompt "要更新的主机名，例如 home.example.com 或 home" "${CFRECORD_NAME:-}")"
+  CFZONE_NAME="$(prompt_private "根域名 / Zone，例如 example.com" "${CFZONE_NAME:-}")"
+  CFRECORD_NAME="$(prompt_private "要更新的主机名，例如 home.example.com 或 home" "${CFRECORD_NAME:-}")"
   CFRECORD_TYPE="$(prompt "记录类型 A/AAAA" "${CFRECORD_TYPE:-A}")"
   CFTTL="$(prompt "TTL（120-86400）" "${CFTTL:-120}")"
   FORCE="$(prompt "是否每次都强制更新 true/false" "${FORCE:-false}")"
   title "定时任务"
   CRON_SCHEDULE="$(prompt "Cron 表达式，默认每 5 分钟执行一次" "${CRON_SCHEDULE:-*/5 * * * *}")"
-  CRON_LOG_FILE="$(prompt "Cron 日志文件（留空则不记录）" "${CRON_LOG_FILE:-}")"
+  CRON_LOG_FILE="$(prompt_private "Cron 日志文件（留空则不记录）" "${CRON_LOG_FILE:-}")"
 
   normalize_record_name
   configure_wan_site
@@ -362,8 +371,10 @@ update_dns() {
   [ -n "${CFZONE_NAME:-}" ] || die "缺少 Zone 域名。"
   [ -n "${CFRECORD_NAME:-}" ] || die "缺少记录主机名。"
 
-  local wan_ip old_wan_ip response
-  wan_ip="$(fetch_wan_ip)"
+  local wan_ip old_wan_ip response zone_response record_response
+  if ! wan_ip="$(fetch_wan_ip)"; then
+    die "获取公网 IP 失败，请检查网络连接。"
+  fi
   old_wan_ip=""
 
   if [ -f "$WAN_IP_FILE" ]; then
@@ -378,21 +389,28 @@ update_dns() {
   read_cached_ids
   if [ -z "${CFZONE_ID:-}" ] || [ -z "${CFRECORD_ID:-}" ]; then
     log "正在查询 Cloudflare zone 与 record ID..."
-    CFZONE_ID="$(cf_curl -X GET "https://api.cloudflare.com/client/v4/zones?name=$CFZONE_NAME" \
-      -H "Content-Type: application/json" | grep -Po '(?<="id":")[^"]*' | head -1)"
+    if ! zone_response="$(cf_curl -X GET "https://api.cloudflare.com/client/v4/zones?name=$CFZONE_NAME" \
+      -H "Content-Type: application/json")"; then
+      die "查询 Cloudflare Zone 失败，请检查网络连接。"
+    fi
+    CFZONE_ID="$(printf '%s' "$zone_response" | grep -Po '(?<="id":")[^"]*' | head -1 || true)"
+    [ -n "$CFZONE_ID" ] || die "未找到对应的 Zone ID，请检查认证信息和 Zone 配置。"
 
-    CFRECORD_ID="$(cf_curl -X GET "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records?name=$CFRECORD_NAME" \
-      -H "Content-Type: application/json" | grep -Po '(?<="id":")[^"]*' | head -1)"
-
-    [ -n "$CFZONE_ID" ] || die "未找到对应的 zone ID。"
-    [ -n "$CFRECORD_ID" ] || die "未找到对应的 record ID。"
+    if ! record_response="$(cf_curl -X GET "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records?name=$CFRECORD_NAME" \
+      -H "Content-Type: application/json")"; then
+      die "查询 Cloudflare DNS 记录失败，请检查网络连接。"
+    fi
+    CFRECORD_ID="$(printf '%s' "$record_response" | grep -Po '(?<="id":")[^"]*' | head -1 || true)"
+    [ -n "$CFRECORD_ID" ] || die "未找到对应的 DNS 记录，请检查记录配置。"
     write_cached_ids
   fi
 
-  log "更新 DNS：$CFRECORD_NAME -> $wan_ip"
-  response="$(cf_curl -X PUT "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records/$CFRECORD_ID" \
+  log "更新 DNS：目标主机名（已隐藏） -> $wan_ip"
+  if ! response="$(cf_curl -X PUT "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records/$CFRECORD_ID" \
     -H "Content-Type: application/json" \
-    --data "{\"id\":\"$CFZONE_ID\",\"type\":\"$CFRECORD_TYPE\",\"name\":\"$CFRECORD_NAME\",\"content\":\"$wan_ip\",\"ttl\":$CFTTL}")"
+    --data "{\"id\":\"$CFZONE_ID\",\"type\":\"$CFRECORD_TYPE\",\"name\":\"$CFRECORD_NAME\",\"content\":\"$wan_ip\",\"ttl\":$CFTTL}")"; then
+    die "更新 Cloudflare DNS 失败，请检查网络连接。"
+  fi
 
   if printf '%s' "$response" | grep -q '"success":true'; then
     printf '%s\n' "$wan_ip" > "$WAN_IP_FILE"
@@ -406,7 +424,7 @@ update_dns() {
     log "建议："
     log "  1) 如果你填的是 API Token，请在交互配置里选 token。"
     log "  2) 如果你填的是 Global API Key，请确认邮箱和 key 都正确。"
-    log "  3) Token 需要至少有 Zone:Read 和 DNS:Edit 权限，并且作用范围要包含 $CFZONE_NAME。"
+    log "  3) Token 需要至少有 Zone:Read 和 DNS:Edit 权限，并且作用范围要包含目标 Zone。"
   fi
   return 1
 }
@@ -431,8 +449,8 @@ show_config() {
   else
     printf '  API Token    : %s\n' "$(mask_value "${CFKEY:-}")"
   fi
-  printf '  Zone         : %s\n' "${CFZONE_NAME:-未设置}"
-  printf '  DNS 记录     : %s\n' "${CFRECORD_NAME:-未设置}"
+  printf '  Zone         : %s\n' "$(mask_private "${CFZONE_NAME:-}")"
+  printf '  DNS 记录     : %s\n' "$(mask_private "${CFRECORD_NAME:-}")"
   printf '  记录类型     : %s\n' "${CFRECORD_TYPE:-A}"
   printf '  TTL          : %s\n' "${CFTTL:-120}"
   printf '  强制更新     : %s\n' "${FORCE:-false}"
