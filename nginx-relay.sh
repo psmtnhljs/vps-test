@@ -8,10 +8,12 @@
 #   - 支持静态 IP 转发、域名/DDNS 转发
 #   - 自动按目标地址族匹配本机 proxy_bind 地址与监听地址
 #   - 支持多 IP 服务器选择具体的出站 IP
+#   - 支持一键安装为全局快捷命令 ngrl（./nginx-relay.sh --install），
+#     安装后可直接运行 `sudo ngrl` 启动本脚本
 
 set -euo pipefail
 
-readonly SCRIPT_VERSION="1.1.3"
+readonly SCRIPT_VERSION="1.2.0"
 readonly NGINX_CONF="/etc/nginx/nginx.conf"
 readonly RELAY_DIR="/etc/nginx/stream.d"
 readonly RELAY_CONF="${RELAY_DIR}/nginx-relay.conf"
@@ -19,6 +21,7 @@ readonly RELAY_DB="${RELAY_DIR}/nginx-relay.db"
 readonly STATE_FILE="/etc/nginx/.nginx-relay.state"
 readonly BACKUP_DIR="/etc/nginx/nginx-relay-backups"
 readonly STREAM_INCLUDE="/etc/nginx/stream.d/*.conf"
+readonly INSTALL_PATH="/usr/local/bin/ngrl"
 
 MODE=""
 STREAM_INCLUDE_MODE=""
@@ -1040,6 +1043,28 @@ check_and_restart() {
     fi
 }
 
+# 将本脚本安装为全局快捷命令，安装后可直接运行 `sudo ngrl` 启动。
+install_shortcut() {
+    require_root
+
+    local script_path
+    script_path="$(readlink -f "${BASH_SOURCE[0]}")"
+
+    if [[ -z "$script_path" || ! -f "$script_path" ]]; then
+        die "无法定位脚本自身路径，安装失败。"
+    fi
+
+    if [[ "$(readlink -f "$INSTALL_PATH" 2>/dev/null || true)" == "$script_path" ]]; then
+        ok "快捷命令 ${INSTALL_PATH} 已指向当前脚本，无需重复安装。"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$INSTALL_PATH")"
+    install -m 755 "$script_path" "$INSTALL_PATH"
+    ok "已安装快捷命令：${INSTALL_PATH}"
+    info "以后可直接运行 'sudo ngrl' 启动本脚本，无需输入完整路径。"
+}
+
 show_menu() {
     msg ""
     msg "=============================================="
@@ -1052,6 +1077,7 @@ show_menu() {
     msg "4) 创建内网 IP 转发（仅内网目标）"
     msg "5) 删除转发"
     msg "6) 测试配置并重启 Nginx"
+    msg "7) 安装/更新快捷命令 ngrl（之后可直接输入 ngrl 运行）"
     msg "0) 退出"
 }
 
@@ -1098,10 +1124,31 @@ main() {
             4) create_internal_relay ;;
             5) delete_relay ;;
             6) check_and_restart ;;
+            7) install_shortcut ;;
             0) info "已退出。"; exit 0 ;;
             *) warn "无效选项，请重新输入。" ;;
         esac
     done
 }
+
+case "${1:-}" in
+    -i|--install|install)
+        install_shortcut
+        exit 0
+        ;;
+    -h|--help)
+        cat <<EOF
+用法: $(basename "$0") [选项]
+
+选项:
+  -i, --install   将本脚本安装为全局命令 ngrl（安装到 ${INSTALL_PATH}），
+                  之后可直接使用 'sudo ngrl' 启动，无需再输入完整路径。
+  -h, --help      显示本帮助信息并退出。
+
+不带选项运行时，将直接进入交互式菜单（菜单中也提供“安装快捷命令”选项）。
+EOF
+        exit 0
+        ;;
+esac
 
 main "$@"
