@@ -29,7 +29,6 @@ bash <(curl -Ls https://raw.githubusercontent.com/psmtnhljs/vps-test/main/tk.sh)
 ```bash
 # 下载 Nginx 转发脚本
 wget -O nginx-relay.sh https://raw.githubusercontent.com/psmtnhljs/vps-test/main/nginx-relay.sh
-less nginx-relay.sh
 chmod +x nginx-relay.sh
 sudo bash nginx-relay.sh
 
