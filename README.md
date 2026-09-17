@@ -179,6 +179,27 @@ Cloudflare 凭据只应通过交互输入或本地私有配置提供，绝不要
 
 脚本会修改 SSH 配置。执行前请确认当前 SSH 端口和登录方式，并准备回滚途径。
 
+回归测试（无需改动本机 SSH 配置，全部在临时沙箱中执行）：
+
+```bash
+bash tests/test_root_sh.sh
+```
+
+v4.2.1 修复内容：
+
+- 修复 `bash <(curl ...)` / `sudo bash root.sh` 等非登录 shell 下 PATH 不含
+  `/usr/sbin`、`/sbin`，导致 `sshd`、`chpasswd` 被误判为缺少依赖，并在
+  `sshd -t` 处报 `sshd: 未找到命令`、配置校验必然失败并回滚的问题。
+  现在会按绝对路径定位 sshd，并在依赖安装后重新校验。
+- 修复 `sshd_config` 顶部 `Include /etc/ssh/sshd_config.d/*.conf` 的优先级问题
+  （sshd 取"首个出现"的值），避免把设置写在文件末尾导致"提示成功但未生效"；
+  配置写入后还会用 `sshd -T` 校验实际生效值。
+- 修复私钥导出使用 `${key_path%.*}` 截断路径，导致路径含 `.` 时 `.pem`/`.ppk`
+  被写到意外位置的问题。
+- 修复 puttygen 缺失或转换失败时 `export_key_formats` 返回非 0，配合 `set -e`
+  使"仅密钥"模式静默中断的问题。
+- 无 systemd 或 `reload` 不可用时，依次回退到 `service reload` 与 `SIGHUP`。
+
 ### `xrayQ.sh`
 
 支持以下配置类型：
