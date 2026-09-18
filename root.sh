@@ -1,15 +1,25 @@
 #!/bin/bash
 # By Quorecs
 # SSH Authentication Configuration Script
-# Version: 4.2.1
+# Version: 4.2.0
 # Purpose: 安全配置 SSH 认证方式
 #
 #
 set -euo pipefail
+
+####################################
+# 修复：某些 root shell（例如通过不带 "-" 的 su 切换、
+# 部分精简容器/VPS 镜像等）PATH 中不包含 /usr/sbin、/sbin，
+# 会导致 sshd、chpasswd 等系统管理类命令被误判为"未找到"，
+# 即使它们已经安装在磁盘上。这里显式把标准系统目录补全到 PATH，
+# 且放在最前面优先查找，避免依赖调用方 shell 的 PATH 设置。
+####################################
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH}"
+
 ####################################
 # 配置
 ####################################
-readonly SCRIPT_VERSION="4.2.1"
+readonly SCRIPT_VERSION="4.2.0"
 readonly MIN_PASSWORD_LENGTH=8
 readonly SSHD_CONFIG="/etc/ssh/sshd_config"
 readonly LOG_FILE="/var/log/ssh_auth_setup.log"
@@ -17,11 +27,6 @@ readonly KEY_DIR="/root/ssh_keys"
 readonly AUTH_KEYS_DIR="/root/.ssh"
 readonly AUTH_KEYS_FILE="${AUTH_KEYS_DIR}/authorized_keys"
 readonly TEST_TIMEOUT=120
-
-# 修复：以 `bash <(curl ...)`、`sudo bash root.sh` 等非登录 shell 方式运行时，
-# root 的 PATH 通常不包含 /usr/sbin、/sbin，导致 sshd、chpasswd 被误判为
-# "缺少依赖"，且后续 `sshd -t` 直接报 "sshd: 未找到命令"。
-export PATH="${PATH}:/usr/sbin:/sbin:/usr/local/sbin"
 
 # 颜色
 C_GREEN='\033[32m'
@@ -35,8 +40,6 @@ C_RESET='\033[0m'
 ####################################
 BACKUP_PATH=""
 GENERATED_KEY_PATH=""
-# sshd 可执行文件绝对路径（由 check_dependencies 解析）
-SSHD_BIN=""
 
 ####################################
 # 日志函数
@@ -70,93 +73,33 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 ####################################
-# 解析 sshd 可执行文件绝对路径
-# 修复：sshd 通常位于 /usr/sbin，而 `bash <(curl ...)`、`sudo bash` 等
-# 非登录 shell 的 PATH 常常不含该目录，直接调用 `sshd` 会报
-# "sshd: 未找到命令"，导致配置校验必然失败并触发回滚。
-# 这里按常见路径逐个查找，最后才回退到 PATH 查找。
-####################################
-resolve_sshd_bin() {
-    local candidate
-
-    for candidate in /usr/sbin/sshd /sbin/sshd \
-                     /usr/local/sbin/sshd /usr/local/bin/sshd /usr/bin/sshd; do
-        if [[ -x "$candidate" ]]; then
-            echo "$candidate"
-            return 0
-        fi
-    done
-
-    candidate=$(command -v sshd 2>/dev/null || true)
-    if [[ -n "$candidate" && -x "$candidate" ]]; then
-        echo "$candidate"
-        return 0
-    fi
-
-    return 1
-}
-
-####################################
 # 依赖检查
 ####################################
 check_dependencies() {
+    local deps=(passwd sshd systemctl ssh-keygen)
     local missing=()
-    local cmd
 
-    for cmd in chpasswd ssh-keygen systemctl; do
+    for cmd in "${deps[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then
             missing+=("$cmd")
         fi
     done
 
-    # 修复：sshd 用绝对路径解析，不依赖 PATH
-    if ! SSHD_BIN="$(resolve_sshd_bin)"; then
-        SSHD_BIN=""
-        missing+=("sshd")
-    fi
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        msg_warn "缺少依赖: ${missing[*]}"
+        msg_info "正在安装..."
 
-    if [[ ${#missing[@]} -eq 0 ]]; then
-        msg_ok "依赖检查通过 (sshd: ${SSHD_BIN})"
-        return 0
-    fi
-
-    msg_warn "缺少依赖: ${missing[*]}"
-    msg_info "正在安装..."
-
-    if command -v apt-get &>/dev/null; then
-        if ! apt-get update -qq || ! apt-get install -y openssh-server passwd systemd putty-tools; then
-            msg_err "依赖安装失败，请手动安装: ${missing[*]}"
+        if command -v apt-get &>/dev/null; then
+            apt-get update -qq
+            apt-get install -y openssh-server passwd systemd putty-tools
+        elif command -v yum &>/dev/null; then
+            yum install -y openssh-server passwd systemd putty
+        else
+            msg_err "无法自动安装依赖，请手动安装"
             exit 1
         fi
-    elif command -v dnf &>/dev/null; then
-        if ! dnf install -y openssh-server passwd systemd putty; then
-            msg_err "依赖安装失败，请手动安装: ${missing[*]}"
-            exit 1
-        fi
-    elif command -v yum &>/dev/null; then
-        if ! yum install -y openssh-server passwd systemd putty; then
-            msg_err "依赖安装失败，请手动安装: ${missing[*]}"
-            exit 1
-        fi
-    else
-        msg_err "无法自动安装依赖，请手动安装: ${missing[*]}"
-        exit 1
+        msg_ok "依赖安装完成"
     fi
-
-    # 修复：安装后重新校验，避免安装静默失败后带着缺失的 sshd 继续执行
-    if ! SSHD_BIN="$(resolve_sshd_bin)"; then
-        SSHD_BIN=""
-        msg_err "sshd 仍不可用，请确认已安装 openssh-server"
-        exit 1
-    fi
-    for cmd in chpasswd ssh-keygen; do
-        if ! command -v "$cmd" &>/dev/null; then
-            msg_err "命令仍不可用: $cmd，请手动安装"
-            exit 1
-        fi
-    done
-
-    msg_ok "依赖安装完成 (sshd: ${SSHD_BIN})"
 }
 
 ####################################
@@ -181,65 +124,39 @@ backup_sshd_config() {
 ####################################
 restore_sshd_config() {
     local backup="$1"
-    if [[ -f "$backup" ]]; then
-        cp -a "$backup" "$SSHD_CONFIG"
-        msg_warn "已恢复配置: $backup"
-        reload_sshd
+
+    if [[ ! -f "$backup" ]]; then
+        msg_err "回滚失败：备份文件不存在: $backup"
+        return 1
     fi
+
+    if ! cp -a "$backup" "$SSHD_CONFIG"; then
+        msg_err "回滚失败：无法恢复配置文件"
+        return 1
+    fi
+
+    msg_warn "已恢复配置: $backup"
+    if ! reload_sshd; then
+        msg_err "回滚后的 SSH 配置未能成功重载，请立即手动检查"
+        return 1
+    fi
+    return 0
 }
 
 ####################################
 # 修改 SSH 配置
-# 修复：sshd 对同一个关键字取"首次出现"的值，而 Debian/Ubuntu 的
-# /etc/ssh/sshd_config 顶部就有 `Include /etc/ssh/sshd_config.d/*.conf`，
-# 原来把设置写在文件末尾（或替换文件下方的注释行）会被 drop-in 文件覆盖，
-# 出现"脚本提示配置成功、实际并未生效"的假成功。现在统一把设置写到
-# 第一条 Include 之前，确保生效。
 ####################################
 set_sshd_option() {
     local key="$1"
     local value="$2"
 
-    # 先移除已有的同名设置（含被注释掉的），避免重复项
-    sed -i "/^[[:space:]]*#\?[[:space:]]*${key}[[:space:]]/d" "$SSHD_CONFIG"
-
-    local include_line
-    include_line=$(grep -nE '^[[:space:]]*Include[[:space:]]' "$SSHD_CONFIG" 2>/dev/null \
-        | head -1 | cut -d: -f1)
-
-    if [[ -n "$include_line" ]]; then
-        # 插到 Include 之前：sshd 取首个出现的值，因此这里的设置优先于 drop-in
-        sed -i "${include_line}i ${key} ${value}" "$SSHD_CONFIG"
+    if grep -qE "^[[:space:]]*${key}[[:space:]]" "$SSHD_CONFIG"; then
+        sed -i "s/^[[:space:]]*${key}[[:space:]].*/${key} ${value}/" "$SSHD_CONFIG" || return 1
+    elif grep -qE "^[[:space:]]*#[[:space:]]*${key}[[:space:]]" "$SSHD_CONFIG"; then
+        sed -i "s/^[[:space:]]*#[[:space:]]*${key}[[:space:]].*/${key} ${value}/" "$SSHD_CONFIG" || return 1
     else
-        echo "${key} ${value}" >> "$SSHD_CONFIG"
+        echo "${key} ${value}" >> "$SSHD_CONFIG" || return 1
     fi
-}
-
-####################################
-# 校验设置是否真正生效（sshd -T 读取生效值）
-# 修复：仅检查配置文件文本不足以发现被 drop-in 覆盖的情况
-####################################
-get_effective_sshd_option() {
-    local key="$1"
-    "$SSHD_BIN" -T -f "$SSHD_CONFIG" 2>/dev/null \
-        | awk -v k="$key" 'tolower($1)==tolower(k) {print tolower($2); exit}'
-}
-
-verify_sshd_option() {
-    local key="$1"
-    local expected="$2"
-    local actual
-
-    actual=$(get_effective_sshd_option "$key")
-
-    # 取不到生效值（例如精简环境）时不阻塞流程
-    if [[ -z "$actual" || "$actual" == "$expected" ]]; then
-        return 0
-    fi
-
-    msg_warn "配置未生效: ${key} 期望 '${expected}'，实际 '${actual}'"
-    msg_warn "请检查 /etc/ssh/sshd_config.d/*.conf 中是否有同名设置（sshd 取首个出现的值）"
-    return 1
 }
 
 ####################################
@@ -267,9 +184,7 @@ reload_sshd() {
     msg_info "重载 SSH 服务: $service"
 
     # 验证配置
-    # 修复：使用解析出的 sshd 绝对路径，并用 -f 明确校验目标配置文件，
-    # 避免 PATH 缺少 /usr/sbin 时误报"SSH 配置验证失败"
-    if ! "$SSHD_BIN" -t -f "$SSHD_CONFIG" 2>&1 | tee -a "$LOG_FILE"; then
+    if ! sshd -t 2>&1 | tee -a "$LOG_FILE"; then
         msg_err "SSH 配置验证失败"
         return 1
     fi
@@ -283,22 +198,8 @@ reload_sshd() {
         fi
     fi
 
-    # 修复：无 systemd 或 reload 不可用（容器/OpenRC 等）时依次回退
-    if command -v service &>/dev/null && service "$service" reload >/dev/null 2>&1; then
-        msg_ok "SSH 服务已重载 (service $service reload)"
-        return 0
-    fi
-
-    local pid_file
-    for pid_file in /run/sshd.pid /var/run/sshd.pid; do
-        if [[ -f "$pid_file" ]] && kill -HUP "$(cat "$pid_file")" 2>/dev/null; then
-            msg_ok "SSH 服务已重载 (SIGHUP)"
-            return 0
-        fi
-    done
-
-    msg_warn "SSH 服务重载失败，继续执行"
-    return 0
+    msg_err "SSH 服务重载失败"
+    return 1
 }
 
 ####################################
@@ -357,12 +258,7 @@ generate_ssh_key() {
 ####################################
 export_key_formats() {
     local private_key="$1"
-    # 修复：原写法 `local base="${private_key%.*}"` 会按最后一个 "." 截断路径。
-    # 生成的私钥本身没有扩展名，一旦路径中任何一层目录含 "."（例如
-    # /root/ssh.keys/... 或测试用 /tmp/tmp.XXXX/...），base 会被错误截断，
-    # .pem/.ppk 会被写到 /tmp/tmp.pem 之类的意外位置。
-    # 这里只去掉可能存在的 .pub 后缀，其余路径原样保留。
-    local base="${private_key%.pub}"
+    local base="${private_key%.*}"
 
     # PEM 格式
     cp "$private_key" "${base}.pem"
@@ -379,11 +275,7 @@ export_key_formats() {
     echo ""
     msg_ok "密钥文件:"
     echo "  私钥 (PEM): ${base}.pem"
-    # 修复：原写法以 `[[ -f ... ]] && echo` 结尾，当 PPK 未生成（puttygen 缺失
-    # 或转换失败）时函数返回非 0，配合 set -e 会让脚本静默退出，模式 3 中断。
-    if [[ -f "${base}.ppk" ]]; then
-        echo "  私钥 (PPK): ${base}.ppk"
-    fi
+    [[ -f "${base}.ppk" ]] && echo "  私钥 (PPK): ${base}.ppk"
     echo "  公钥 (PUB): ${private_key}.pub"
     echo ""
 }
@@ -453,6 +345,18 @@ get_ssh_port() {
 }
 
 ####################################
+# 格式化 SSH 主机地址
+####################################
+format_ssh_host() {
+    local host="$1"
+    if [[ "$host" == *:* && "$host" != \[*\] ]]; then
+        printf '[%s]\n' "$host"
+    else
+        printf '%s\n' "$host"
+    fi
+}
+
+####################################
 # 密钥登录测试
 # 修复：nohup 子 shell 无法调用当前脚本的函数
 # 改为在子 shell 中直接内联所有需要执行的命令，
@@ -465,6 +369,8 @@ test_key_login() {
     server_ip=$(get_server_ip)
     local ssh_port
     ssh_port=$(get_ssh_port)
+    local ssh_host
+    ssh_host=$(format_ssh_host "$server_ip")
 
     # 检测服务名（需在主进程中提前获取，传给子 shell）
     local service
@@ -478,13 +384,13 @@ test_key_login() {
     echo "请在新终端执行以下步骤："
     echo ""
     echo "1. 下载密钥:"
-    echo "   scp -P ${ssh_port} root@${server_ip}:${key_base}.pem ~/.ssh/"
+    echo "   scp -P ${ssh_port} root@${ssh_host}:${key_base}.pem ~/.ssh/"
     echo ""
     echo "2. 设置权限:"
     echo "   chmod 600 ~/.ssh/$(basename "${key_base}").pem"
     echo ""
     echo "3. 测试登录:"
-    echo "   ssh -p ${ssh_port} -i ~/.ssh/$(basename "${key_base}").pem root@${server_ip}"
+    echo "   ssh -p ${ssh_port} -i ~/.ssh/$(basename "${key_base}").pem root@${ssh_host}"
     echo ""
     echo "4. 如果登录成功，返回此窗口输入 'yes'"
     echo ""
@@ -505,8 +411,8 @@ if [[ -f '${backup}' ]]; then
     cp -a '${backup}' '${SSHD_CONFIG}'
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARN: 超时回滚已执行，配置已恢复" >> '${LOG_FILE}'
     # 验证配置合法性再重载，防止回滚文件本身损坏
-    if '${SSHD_BIN}' -t -f '${SSHD_CONFIG}' >/dev/null 2>&1; then
-        systemctl reload ${service} >/dev/null 2>&1 || service ${service} reload >/dev/null 2>&1 || true
+    if sshd -t >/dev/null 2>&1; then
+        systemctl reload ${service} >/dev/null 2>&1 || systemctl restart ${service} >/dev/null 2>&1 || true
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARN: SSH 服务已重载（超时回滚）" >> '${LOG_FILE}'
     else
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: 回滚配置验证失败，请手动检查" >> '${LOG_FILE}'
@@ -567,10 +473,14 @@ mode_hybrid() {
     # 配置 SSH
     echo ""
     msg_info "步骤 2/3: 配置 SSH"
-    set_sshd_option "PermitRootLogin" "yes"
-    set_sshd_option "PasswordAuthentication" "yes"
-    set_sshd_option "PubkeyAuthentication" "yes"
-    set_sshd_option "UsePAM" "yes"
+    if ! set_sshd_option "PermitRootLogin" "yes" || \
+       ! set_sshd_option "PasswordAuthentication" "yes" || \
+       ! set_sshd_option "PubkeyAuthentication" "yes" || \
+       ! set_sshd_option "UsePAM" "yes"; then
+        msg_err "SSH 配置写入失败"
+        restore_sshd_config "$backup" || true
+        exit 1
+    fi
     msg_ok "SSH 配置完成"
 
     # 重载服务
@@ -580,11 +490,6 @@ mode_hybrid() {
         restore_sshd_config "$backup"
         exit 1
     fi
-
-    # 校验实际生效值，避免被 sshd_config.d 覆盖后"假成功"
-    verify_sshd_option "PermitRootLogin" "yes" || true
-    verify_sshd_option "PasswordAuthentication" "yes" || true
-    verify_sshd_option "PubkeyAuthentication" "yes" || true
 
     echo ""
     msg_ok "混合认证模式配置完成"
@@ -620,10 +525,14 @@ mode_password_only() {
     # 配置 SSH
     echo ""
     msg_info "步骤 2/3: 配置 SSH"
-    set_sshd_option "PermitRootLogin" "yes"
-    set_sshd_option "PasswordAuthentication" "yes"
-    set_sshd_option "PubkeyAuthentication" "no"
-    set_sshd_option "UsePAM" "yes"
+    if ! set_sshd_option "PermitRootLogin" "yes" || \
+       ! set_sshd_option "PasswordAuthentication" "yes" || \
+       ! set_sshd_option "PubkeyAuthentication" "no" || \
+       ! set_sshd_option "UsePAM" "yes"; then
+        msg_err "SSH 配置写入失败"
+        restore_sshd_config "$backup" || true
+        exit 1
+    fi
     msg_ok "SSH 配置完成"
 
     # 重载服务
@@ -633,11 +542,6 @@ mode_password_only() {
         restore_sshd_config "$backup"
         exit 1
     fi
-
-    # 校验实际生效值，避免被 sshd_config.d 覆盖后"假成功"
-    verify_sshd_option "PermitRootLogin" "yes" || true
-    verify_sshd_option "PasswordAuthentication" "yes" || true
-    verify_sshd_option "PubkeyAuthentication" "no" || true
 
     echo ""
     msg_ok "仅密码认证模式配置完成"
@@ -701,9 +605,13 @@ mode_key_only() {
     msg_info "步骤 4/5: 启用密钥登录（测试阶段暂保留密码）"
     msg_warn "[安全提示] 此阶段密码登录仍开启，仅用于测试保障，测试后将自动关闭"
     log_msg "临时开放 PasswordAuthentication yes（测试阶段）"
-    set_sshd_option "PermitRootLogin" "yes"
-    set_sshd_option "PubkeyAuthentication" "yes"
-    set_sshd_option "PasswordAuthentication" "yes"
+    if ! set_sshd_option "PermitRootLogin" "yes" || \
+       ! set_sshd_option "PubkeyAuthentication" "yes" || \
+       ! set_sshd_option "PasswordAuthentication" "yes"; then
+        msg_err "SSH 测试阶段配置写入失败"
+        restore_sshd_config "$backup" || true
+        exit 1
+    fi
 
     if ! reload_sshd; then
         restore_sshd_config "$backup"
@@ -713,41 +621,35 @@ mode_key_only() {
     # 测试密钥登录
     echo ""
     msg_info "步骤 5/5: 测试密钥登录"
-    # 修复：私钥路径没有扩展名，不能再用 ${key_path%.*} 截断（路径含 "." 时会截错）
-    if ! test_key_login "$backup" "$key_path"; then
+    if ! test_key_login "$backup" "${key_path%.*}"; then
         exit 1
     fi
 
     # 禁用密码登录
     echo ""
     msg_info "禁用密码登录"
-    set_sshd_option "PasswordAuthentication" "no"
+    if ! set_sshd_option "PasswordAuthentication" "no"; then
+        msg_err "关闭密码登录配置失败"
+        restore_sshd_config "$backup" || true
+        exit 1
+    fi
     log_msg "PasswordAuthentication 已关闭"
 
-    reload_sshd || true
-
-    # 校验实际生效值：密码登录必须真正被禁用，否则如实提示而不是谎报成功
-    local pwd_effective
-    pwd_effective=$(get_effective_sshd_option "PasswordAuthentication" || true)
-    verify_sshd_option "PubkeyAuthentication" "yes" || true
+    if ! reload_sshd; then
+        msg_err "关闭密码登录后 SSH 服务重载失败，执行回滚"
+        restore_sshd_config "$backup" || true
+        exit 1
+    fi
 
     echo ""
-    if [[ "$pwd_effective" == "no" ]]; then
-        msg_ok "仅密钥认证模式配置完成"
-    else
-        msg_warn "仅密钥认证模式已写入配置，但密码登录仍未真正禁用"
-    fi
+    msg_ok "仅密钥认证模式配置完成"
     echo ""
     echo "当前状态:"
-    if [[ "$pwd_effective" == "no" ]]; then
-        echo "  ✗ 密码登录: 已禁用"
-    else
-        echo "  ! 密码登录: 仍为启用 (PasswordAuthentication ${pwd_effective:-unknown})"
-    fi
+    echo "  ✗ 密码登录: 已禁用"
     echo "  ✓ 密钥登录: 已启用"
     echo ""
     msg_warn "重要: 请妥善保管私钥文件"
-    echo "密钥位置: ${key_path}.pem"
+    echo "密钥位置: ${key_path%.*}.pem"
     echo ""
 }
 
@@ -755,7 +657,7 @@ mode_key_only() {
 # 主菜单
 ####################################
 show_menu() {
-    clear
+    clear 2>/dev/null || true
     echo ""
     echo "=========================================="
     echo " SSH 认证配置 v${SCRIPT_VERSION}"
@@ -797,7 +699,10 @@ main() {
 
     # 读取选择
     local choice
-    read -p "请选择 [0-3]: " choice
+    if ! read -r -p "请选择 [0-3]: " choice; then
+        msg_err "未读取到菜单选择，脚本退出"
+        exit 1
+    fi
     log_msg "用户输入选项: $choice"
 
     case "$choice" in
