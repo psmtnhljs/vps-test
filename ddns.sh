@@ -6,6 +6,7 @@ CONFIG_FILE="${HOME}/.ddns-cloudflare.conf"
 STATE_DIR="${HOME}/.ddns-cloudflare"
 WAN_IP_FILE="${STATE_DIR}/wan_ip.txt"
 ID_FILE="${STATE_DIR}/record_id.txt"
+LOCK_DIR="${STATE_DIR}/update.lock"
 
 CFKEY=""
 CFUSER=""
@@ -17,7 +18,11 @@ CFTTL="120"
 FORCE="false"
 CRON_SCHEDULE="*/5 * * * *"
 CRON_LOG_FILE="${STATE_DIR}/ddns.log"
-WANIPSITE="http://ipv4.icanhazip.com"
+WANIPSITE="https://ipv4.icanhazip.com"
+
+CRON_BEGIN="# BEGIN ddns.sh managed block"
+CRON_END="# END ddns.sh managed block"
+CRON_LEGACY_MARK="# ddns.sh managed by script"
 
 log() {
   printf '%s\n' "$*"
@@ -130,7 +135,7 @@ prompt_secret() {
   else
     read -r -s -p "${message}: " reply
   fi
-  printf '\n'
+  printf '\n' >&2
   reply="$(trim "$reply")"
   [ -n "$reply" ] || reply="$default"
   printf '%s' "$reply"
@@ -165,6 +170,7 @@ ensure_cron_dependency() {
 
 ensure_state_dir() {
   mkdir -p "$STATE_DIR"
+  chmod 700 "$STATE_DIR" 2>/dev/null || true
 }
 
 load_config() {
@@ -177,7 +183,7 @@ load_config() {
 save_config() {
   ensure_state_dir
   umask 077
-  cat > "$CONFIG_FILE" <<EOF
+  cat > "$CONFIG_FILE" <<EOF2
 CFKEY=$(printf '%q' "$CFKEY")
 CFUSER=$(printf '%q' "$CFUSER")
 CF_AUTH_MODE=$(printf '%q' "$CF_AUTH_MODE")
@@ -188,32 +194,85 @@ CFTTL=$(printf '%q' "$CFTTL")
 FORCE=$(printf '%q' "$FORCE")
 CRON_SCHEDULE=$(printf '%q' "$CRON_SCHEDULE")
 CRON_LOG_FILE=$(printf '%q' "$CRON_LOG_FILE")
-EOF
+EOF2
   chmod 600 "$CONFIG_FILE"
 }
 
 configure_wan_site() {
   case "$CFRECORD_TYPE" in
-    A) WANIPSITE="http://ipv4.icanhazip.com" ;;
-    AAAA) WANIPSITE="http://ipv6.icanhazip.com" ;;
+    A) WANIPSITE="https://ipv4.icanhazip.com" ;;
+    AAAA) WANIPSITE="https://ipv6.icanhazip.com" ;;
     *) die "CFRECORD_TYPE 只能是 A 或 AAAA。" ;;
   esac
 }
 
 normalize_record_name() {
-  if [ -n "$CFZONE_NAME" ] && [ "$CFRECORD_NAME" != "$CFZONE_NAME" ] && ! [ -z "${CFRECORD_NAME##*$CFZONE_NAME}" ]; then
+  if [ -n "$CFZONE_NAME" ] && [ "$CFRECORD_NAME" != "$CFZONE_NAME" ] && [[ "$CFRECORD_NAME" != *".$CFZONE_NAME" ]]; then
     CFRECORD_NAME="$CFRECORD_NAME.$CFZONE_NAME"
     log "=> 主机名不是完整 FQDN，已自动补全（主机名已隐藏）"
+  fi
+}
+
+validate_auth_mode() {
+  case "$CF_AUTH_MODE" in
+    key|token) ;;
+    *) die "认证方式只能是 key 或 token。" ;;
+  esac
+}
+
+validate_config() {
+  validate_auth_mode
+
+  case "$CFRECORD_TYPE" in
+    A|AAAA) ;;
+    *) die "CFRECORD_TYPE 只能是 A 或 AAAA。" ;;
+  esac
+
+  case "$CFTTL" in
+    ''|*[!0-9]*) die "TTL 必须是 120-86400 之间的整数。" ;;
+  esac
+  if [ "$CFTTL" -lt 120 ] || [ "$CFTTL" -gt 86400 ]; then
+    die "TTL 必须是 120-86400 之间的整数。"
+  fi
+
+  case "$FORCE" in
+    true|false) ;;
+    *) die "FORCE 只能是 true 或 false。" ;;
+  esac
+
+  [ -n "$CFZONE_NAME" ] || die "缺少 Zone 域名。"
+  [ -n "$CFRECORD_NAME" ] || die "缺少记录主机名。"
+
+  if [[ "$CFZONE_NAME" == *$'\n'* || "$CFZONE_NAME" == *$'\r'* || "$CFZONE_NAME" == *'"'* || "$CFZONE_NAME" == *'\\'* ]]; then
+    die "Zone 域名包含不支持的字符。"
+  fi
+  if [[ "$CFRECORD_NAME" == *$'\n'* || "$CFRECORD_NAME" == *$'\r'* || "$CFRECORD_NAME" == *'"'* || "$CFRECORD_NAME" == *'\\'* ]]; then
+    die "DNS 记录名称包含不支持的字符。"
+  fi
+  if [[ "$CFKEY" == *$'\n'* || "$CFKEY" == *$'\r'* || "$CFKEY" == *'"'* ]]; then
+    die "Cloudflare Key/Token 包含不支持的字符。"
+  fi
+  if [[ "$CFUSER" == *$'\n'* || "$CFUSER" == *$'\r'* || "$CFUSER" == *'"'* ]]; then
+    die "Cloudflare 邮箱包含不支持的字符。"
   fi
 }
 
 sanitize_cron_schedule() {
   CRON_SCHEDULE="$(trim "$CRON_SCHEDULE")"
   [ -n "$CRON_SCHEDULE" ] || CRON_SCHEDULE="*/5 * * * *"
+  [[ "$CRON_SCHEDULE" != *$'\n'* && "$CRON_SCHEDULE" != *$'\r'* ]] || die "Cron 表达式不能包含换行。"
+
+  if [[ "$CRON_SCHEDULE" != @* ]]; then
+    local f1 f2 f3 f4 f5 extra
+    read -r f1 f2 f3 f4 f5 extra <<< "$CRON_SCHEDULE"
+    if [ -z "$f1" ] || [ -z "$f2" ] || [ -z "$f3" ] || [ -z "$f4" ] || [ -z "$f5" ] || [ -n "$extra" ]; then
+      die "Cron 表达式必须包含 5 个字段，例如：*/5 * * * *。"
+    fi
+  fi
 }
 
 show_help() {
-  cat <<EOF
+  cat <<EOF2
 Usage:
   bash ddns.sh
   bash ddns.sh --run
@@ -224,34 +283,72 @@ Usage:
 Old flags are still supported:
   -k <api-key> -u <email> -h <host> -z <zone> -t <A|AAAA> -f <true|false>
   --auth <key|token>
+  --force
+  --config <path>
 
 Interactive mode will guide you through configuration and save it to:
   $CONFIG_FILE
-EOF
+EOF2
+}
+
+cron_job_line() {
+  if [ -n "${CRON_LOG_FILE:-}" ]; then
+    printf '%s bash "%s" --run >> "%s" 2>&1' "$CRON_SCHEDULE" "$SCRIPT_PATH" "$CRON_LOG_FILE"
+  else
+    printf '%s bash "%s" --run' "$CRON_SCHEDULE" "$SCRIPT_PATH"
+  fi
+}
+
+remove_managed_cron_blocks() {
+  awk -v begin="$CRON_BEGIN" -v end="$CRON_END" -v legacy="$CRON_LEGACY_MARK" -v script="$SCRIPT_PATH" '
+    BEGIN { in_block=0; skip_legacy_command=0 }
+    $0 == begin { in_block=1; next }
+    in_block && $0 == end { in_block=0; next }
+    in_block { next }
+    $0 == legacy { skip_legacy_command=1; next }
+    skip_legacy_command {
+      if (index($0, script) > 0 && $0 ~ /[[:space:]]+bash[[:space:]]+"/ && $0 ~ /[[:space:]]--run([[:space:]]|$)/) {
+        skip_legacy_command=0
+        next
+      }
+      skip_legacy_command=0
+    }
+    { print }
+  '
 }
 
 install_cron_job() {
-  ensure_curl_dependency
   ensure_cron_dependency
   ensure_state_dir
-
   [ -f "$CONFIG_FILE" ] || die "未找到配置文件，请先运行交互配置并保存。"
 
+  normalize_record_name
+  configure_wan_site
+  validate_config
   sanitize_cron_schedule
 
-  local tmp_file
+  local current_cron tmp_file
+  current_cron="$(crontab -l 2>/dev/null || true)"
   tmp_file="$(mktemp)"
-  crontab -l 2>/dev/null | grep -v -F "# ddns.sh managed by script" > "$tmp_file" || :
 
-  {
-    cat "$tmp_file"
-    printf '# ddns.sh managed by script\n'
-    if [ -n "${CRON_LOG_FILE:-}" ]; then
-      printf '%s bash "%s" --run >> "%s" 2>&1\n' "$CRON_SCHEDULE" "$SCRIPT_PATH" "$CRON_LOG_FILE"
-    else
-      printf '%s bash "%s" --run\n' "$CRON_SCHEDULE" "$SCRIPT_PATH"
-    fi
-  } | crontab -
+  if [ -n "$current_cron" ]; then
+    printf '%s\n' "$current_cron" | remove_managed_cron_blocks > "$tmp_file"
+  else
+    : > "$tmp_file"
+  fi
+
+  if ! {
+    {
+      cat "$tmp_file"
+      [ ! -s "$tmp_file" ] || printf '\n'
+      printf '%s\n' "$CRON_BEGIN"
+      cron_job_line
+      printf '\n%s\n' "$CRON_END"
+    } | crontab -
+  }; then
+    rm -f "$tmp_file"
+    die "写入 crontab 失败，请检查 cron 配置。"
+  fi
 
   rm -f "$tmp_file"
   log "已安装/更新 crontab：$CRON_SCHEDULE"
@@ -260,10 +357,21 @@ install_cron_job() {
 
 remove_cron_job() {
   ensure_cron_dependency
-  local tmp_file
+
+  local current_cron tmp_file
+  current_cron="$(crontab -l 2>/dev/null || true)"
   tmp_file="$(mktemp)"
-  crontab -l 2>/dev/null | grep -v -F "# ddns.sh managed by script" > "$tmp_file" || :
-  crontab "$tmp_file"
+
+  if [ -n "$current_cron" ]; then
+    printf '%s\n' "$current_cron" | remove_managed_cron_blocks > "$tmp_file"
+    if ! crontab "$tmp_file"; then
+      rm -f "$tmp_file"
+      die "写入 crontab 失败，请检查 cron 配置。"
+    fi
+  else
+    crontab -r 2>/dev/null || true
+  fi
+
   rm -f "$tmp_file"
   log "已移除与本脚本相关的 crontab 任务。"
 }
@@ -289,6 +397,7 @@ interactive_configure() {
       die "认证方式只能是 key 或 token。"
       ;;
   esac
+
   title "DNS 记录"
   CFZONE_NAME="$(prompt_private "根域名 / Zone，例如 example.com" "${CFZONE_NAME:-}")"
   CFRECORD_NAME="$(prompt_private "要更新的主机名，例如 home.example.com 或 home" "${CFRECORD_NAME:-}")"
@@ -301,30 +410,56 @@ interactive_configure() {
 
   normalize_record_name
   configure_wan_site
+  validate_config
+  sanitize_cron_schedule
   save_config
 
   success "配置已保存到：$CONFIG_FILE"
 }
 
 fetch_wan_ip() {
-  curl -fsS "$WANIPSITE" | tr -d '[:space:]'
+  curl -fsS --connect-timeout 10 --max-time 30 "$WANIPSITE" | tr -d '[:space:]'
+}
+
+validate_wan_ip() {
+  local ip="$1"
+  if [ "$CFRECORD_TYPE" = "A" ]; then
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "获取到的公网 IPv4 地址格式异常：$ip"
+  else
+    [[ "$ip" == *:* ]] || die "获取到的公网 IPv6 地址格式异常：$ip"
+  fi
 }
 
 cf_auth_mode() {
   case "${CF_AUTH_MODE:-key}" in
     token) printf '%s' "token" ;;
-    *) printf '%s' "key" ;;
+    key) printf '%s' "key" ;;
+    *) die "认证方式只能是 key 或 token。" ;;
   esac
 }
 
 cf_curl() {
-  # Keep Cloudflare's JSON error response so update_dns can show a useful,
-  # non-sensitive diagnosis instead of exiting on HTTP 4xx/5xx.
+  # Store authentication headers in a temporary 600-permission curl config file
+  # so API credentials do not appear in the curl process command line.
+  ensure_state_dir
+  local auth_config rc=0
+  umask 077
+  auth_config="$(mktemp "$STATE_DIR/curl-auth.XXXXXX")"
+  chmod 600 "$auth_config"
+
   if [ "$(cf_auth_mode)" = "token" ]; then
-    curl -sS -H "Authorization: Bearer $CFKEY" "$@"
+    printf 'header = "Authorization: Bearer %s"\n' "$CFKEY" > "$auth_config"
   else
-    curl -sS -H "X-Auth-Email: $CFUSER" -H "X-Auth-Key: $CFKEY" "$@"
+    {
+      printf 'header = "X-Auth-Email: %s"\n' "$CFUSER"
+      printf 'header = "X-Auth-Key: %s"\n' "$CFKEY"
+    } > "$auth_config"
   fi
+
+  curl -sS --connect-timeout 10 --max-time 30 \
+    --config "$auth_config" "$@" || rc=$?
+  rm -f "$auth_config"
+  return "$rc"
 }
 
 api_response_failed() {
@@ -368,35 +503,91 @@ read_cached_ids() {
 }
 
 write_cached_ids() {
+  ensure_state_dir
+  umask 077
   {
     printf '%s\n' "$CFZONE_ID"
     printf '%s\n' "$CFRECORD_ID"
     printf '%s\n' "$CFZONE_NAME"
     printf '%s\n' "$CFRECORD_NAME"
   } > "$ID_FILE"
+  chmod 600 "$ID_FILE"
+}
+
+write_wan_ip() {
+  ensure_state_dir
+  umask 077
+  printf '%s\n' "$1" > "$WAN_IP_FILE"
+  chmod 600 "$WAN_IP_FILE"
+}
+
+acquire_update_lock() {
+  ensure_state_dir
+
+  if command -v flock >/dev/null 2>&1; then
+    umask 077
+    exec 9>"$STATE_DIR/update.lock"
+    if ! flock -n 9; then
+      warning "已有另一个 DDNS 更新任务正在运行，跳过本次执行。"
+      exec 9>&-
+      return 1
+    fi
+    return 0
+  fi
+
+  # Fallback for minimal Linux systems without flock.
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$$" > "$LOCK_DIR/pid"
+    chmod 700 "$LOCK_DIR"
+    return 0
+  fi
+
+  local old_pid=""
+  if [ -f "$LOCK_DIR/pid" ]; then
+    old_pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  fi
+
+  if [ -n "$old_pid" ] && [[ "$old_pid" =~ ^[0-9]+$ ]] && kill -0 "$old_pid" 2>/dev/null; then
+    warning "已有另一个 DDNS 更新任务正在运行，跳过本次执行。"
+    return 1
+  fi
+
+  rm -rf "$LOCK_DIR"
+  mkdir "$LOCK_DIR" || die "无法创建 DDNS 更新锁。"
+  printf '%s\n' "$$" > "$LOCK_DIR/pid"
+  chmod 700 "$LOCK_DIR"
+}
+
+release_update_lock() {
+  if command -v flock >/dev/null 2>&1; then
+    flock -u 9 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
+  fi
+  rm -rf "$LOCK_DIR"
 }
 
 update_dns() {
-  # Updating DNS only needs curl.  crontab is required by the optional
-  # install/remove cron actions, not by a one-shot update.
   ensure_curl_dependency
   ensure_state_dir
-  load_config
 
   normalize_record_name
   configure_wan_site
+  validate_config
 
   [ -n "${CFKEY:-}" ] || die "缺少 Cloudflare 凭据。"
   if [ "$(cf_auth_mode)" = "key" ]; then
     [ -n "${CFUSER:-}" ] || die "Global API Key 模式下还需要 Cloudflare 邮箱。"
   fi
-  [ -n "${CFZONE_NAME:-}" ] || die "缺少 Zone 域名。"
-  [ -n "${CFRECORD_NAME:-}" ] || die "缺少记录主机名。"
+
+  if ! acquire_update_lock; then
+    return 0
+  fi
 
   local wan_ip old_wan_ip response zone_response record_response
   if ! wan_ip="$(fetch_wan_ip)"; then
     die "获取公网 IP 失败，请检查网络连接。"
   fi
+  validate_wan_ip "$wan_ip"
   old_wan_ip=""
 
   if [ -f "$WAN_IP_FILE" ]; then
@@ -405,13 +596,15 @@ update_dns() {
 
   if [ "$wan_ip" = "$old_wan_ip" ] && [ "${FORCE:-false}" = "false" ]; then
     log "公网 IP 未变化：$wan_ip，跳过更新。"
+    release_update_lock
     return 0
   fi
 
   read_cached_ids
   if [ -z "${CFZONE_ID:-}" ] || [ -z "${CFRECORD_ID:-}" ]; then
     log "正在查询 Cloudflare zone 与 record ID..."
-    if ! zone_response="$(cf_curl -X GET "https://api.cloudflare.com/client/v4/zones?name=$CFZONE_NAME" \
+    if ! zone_response="$(cf_curl -X GET "https://api.cloudflare.com/client/v4/zones" \
+      --get --data-urlencode "name=$CFZONE_NAME" \
       -H "Content-Type: application/json")"; then
       die "查询 Cloudflare Zone 失败，请检查网络连接。"
     fi
@@ -421,7 +614,8 @@ update_dns() {
     CFZONE_ID="$(extract_first_id "$zone_response")"
     [ -n "$CFZONE_ID" ] || die "未找到对应的 Zone ID，请检查认证信息和 Zone 配置。"
 
-    if ! record_response="$(cf_curl -X GET "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records?name=$CFRECORD_NAME" \
+    if ! record_response="$(cf_curl -X GET "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records" \
+      --get --data-urlencode "name=$CFRECORD_NAME" \
       -H "Content-Type: application/json")"; then
       die "查询 Cloudflare DNS 记录失败，请检查网络连接。"
     fi
@@ -434,26 +628,32 @@ update_dns() {
   fi
 
   log "更新 DNS：目标主机名（已隐藏） -> $wan_ip"
+  local payload
+  payload="$(printf '{\"id\":\"%s\",\"type\":\"%s\",\"name\":\"%s\",\"content\":\"%s\",\"ttl\":%s}' \
+    "$CFZONE_ID" "$CFRECORD_TYPE" "$CFRECORD_NAME" "$wan_ip" "$CFTTL")"
+
   if ! response="$(cf_curl -X PUT "https://api.cloudflare.com/client/v4/zones/$CFZONE_ID/dns_records/$CFRECORD_ID" \
     -H "Content-Type: application/json" \
-    --data "{\"id\":\"$CFZONE_ID\",\"type\":\"$CFRECORD_TYPE\",\"name\":\"$CFRECORD_NAME\",\"content\":\"$wan_ip\",\"ttl\":$CFTTL}")"; then
+    --data "$payload")"; then
     die "更新 Cloudflare DNS 失败，请检查网络连接。"
   fi
 
-  if printf '%s' "$response" | grep -q '"success":true'; then
-    printf '%s\n' "$wan_ip" > "$WAN_IP_FILE"
+  if printf '%s' "$response" | grep -q '"success"[[:space:]]*:[[:space:]]*true'; then
+    write_wan_ip "$wan_ip"
     success "更新成功。"
+    release_update_lock
     return 0
   fi
 
   log "更新失败。"
-  if printf '%s' "$response" | grep -q '"success":false'; then
+  if printf '%s' "$response" | grep -q '"success"[[:space:]]*:[[:space:]]*false'; then
     log "提示：如果这里是 403，通常表示认证方式不对，或者当前账号/Token 没有该 Zone 的 DNS 编辑权限。"
     log "建议："
     log "  1) 如果你填的是 API Token，请在交互配置里选 token。"
     log "  2) 如果你填的是 Global API Key，请确认邮箱和 key 都正确。"
     log "  3) Token 需要至少有 Zone:Read 和 DNS:Edit 权限，并且作用范围要包含目标 Zone。"
   fi
+  release_update_lock
   return 1
 }
 
@@ -468,7 +668,7 @@ show_menu() {
 }
 
 show_config() {
-  load_config
+  validate_auth_mode
   title "当前配置（敏感信息已隐藏）"
   printf '  认证方式     : %s\n' "${CF_AUTH_MODE:-key}"
   if [ "$(cf_auth_mode)" = "key" ]; then
@@ -492,31 +692,38 @@ parse_legacy_args() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -k)
-        CFKEY="${2:-}"
+        [ "$#" -ge 2 ] || die "-k 需要一个参数。"
+        CFKEY="$2"
         shift 2
         ;;
       -u)
-        CFUSER="${2:-}"
+        [ "$#" -ge 2 ] || die "-u 需要一个参数。"
+        CFUSER="$2"
         shift 2
         ;;
       -h)
-        CFRECORD_NAME="${2:-}"
+        [ "$#" -ge 2 ] || die "-h 需要一个参数。"
+        CFRECORD_NAME="$2"
         shift 2
         ;;
       -z)
-        CFZONE_NAME="${2:-}"
+        [ "$#" -ge 2 ] || die "-z 需要一个参数。"
+        CFZONE_NAME="$2"
         shift 2
         ;;
       -t)
-        CFRECORD_TYPE="${2:-}"
+        [ "$#" -ge 2 ] || die "-t 需要一个参数。"
+        CFRECORD_TYPE="$2"
         shift 2
         ;;
       -f)
-        FORCE="${2:-true}"
+        [ "$#" -ge 2 ] || die "-f 需要一个参数。"
+        FORCE="$2"
         shift 2
         ;;
       --auth)
-        CF_AUTH_MODE="${2:-$CF_AUTH_MODE}"
+        [ "$#" -ge 2 ] || die "--auth 需要 key 或 token。"
+        CF_AUTH_MODE="$2"
         shift 2
         ;;
       --auth=*)
@@ -528,18 +735,16 @@ parse_legacy_args() {
         shift
         ;;
       --config)
-        CONFIG_FILE="${2:-$CONFIG_FILE}"
+        [ "$#" -ge 2 ] || die "--config 需要一个文件路径。"
+        CONFIG_FILE="$2"
         shift 2
         ;;
       --config=*)
         CONFIG_FILE="${1#--config=}"
         shift
         ;;
-      --run)
+      --install-cron|--remove-cron|--show-config|--run)
         shift
-        ;;
-      --install-cron|--remove-cron|--show-config)
-        break
         ;;
       --help)
         show_help
@@ -550,10 +755,12 @@ parse_legacy_args() {
         break
         ;;
       *)
-        break
+        die "未知参数：$1。使用 --help 查看帮助。"
         ;;
     esac
   done
+
+  [ "$#" -eq 0 ] || die "未知参数：$1。使用 --help 查看帮助。"
 }
 
 capture_config_path() {
