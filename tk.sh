@@ -3,7 +3,7 @@
 
 set -u -o pipefail
 
-readonly VERSION="2.0.0"
+readonly VERSION="2.0.1"
 readonly UA_BROWSER="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
 INTERFACE=""
@@ -135,6 +135,8 @@ asn_org="$(json_value "$geo_json" asn_organization)"
 organization="$(json_value "$geo_json" organization)"
 isp="$(json_value "$geo_json" isp)"
 country_code="$(json_value "$geo_json" country_code)"
+region_name="$(json_value "$geo_json" region)"
+city="$(json_value "$geo_json" city)"
 
 [[ -n "$asn_org" ]] || asn_org="$organization"
 asn_text="未知"
@@ -142,6 +144,9 @@ if [[ -n "$asn" || -n "$asn_org" ]]; then
     asn_text="${asn:+AS${asn}}${asn:+${asn_org:+ }}${asn_org}"
 fi
 [[ -n "$isp" ]] || isp="${organization:-未知}"
+location="$country_code"
+[[ -n "$region_name" ]] && location="${location:+${location} / }${region_name}"
+[[ -n "$city" ]] && location="${location:+${location} / }${city}"
 
 if [[ -t 1 && -n "${TERM:-}" && "$TERM" != "dumb" ]]; then
     clear
@@ -152,7 +157,7 @@ printf ' ** 测试时间: %s\n\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
 printf ' %s** 出口 IP: %s%s\n' "$C_CYAN" "$(mask_ip "$public_ip")" "$C_RESET"
 printf ' %s** ASN: %s%s\n' "$C_CYAN" "$asn_text" "$C_RESET"
 printf ' %s** ISP: %s%s\n' "$C_CYAN" "$isp" "$C_RESET"
-[[ -n "$country_code" ]] && printf ' %s** IP 所在地: %s%s\n' "$C_CYAN" "$country_code" "$C_RESET"
+[[ -n "$location" ]] && printf ' %s** IP 所在地: %s%s\n' "$C_CYAN" "$location" "$C_RESET"
 printf '%s\n\n' '******************************************'
 
 printf ' TikTok Region:\t\t'
