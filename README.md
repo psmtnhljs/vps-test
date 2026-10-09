@@ -210,13 +210,58 @@ sudo bash xrayQ.sh vmess
 sudo bash xrayQ.sh ss
 ```
 
+脚本会根据 CPU 架构下载固定版本的 Xray，同时下载官方 `.dgst` 文件并校验 SHA-256。SOCKS 和 Shadowsocks 密码留空时会生成随机密码，不再使用固定默认密码。新配置在覆盖前会由 Xray 校验，服务启动失败时会恢复原配置。
+
+当前固定版本的 Xray 已对 VMess/WebSocket 和内置 Shadowsocks 给出过时警告。脚本暂时保留这些模式用于兼容现有客户端，新部署建议后续增加 VLESS/XHTTP 配置。
+
+```bash
+sudo bash xrayQ.sh --check       # 查看安装和服务状态
+sudo bash xrayQ.sh --update      # 校验后重新安装固定版本
+sudo bash xrayQ.sh --uninstall   # 显示清单、确认并备份后卸载
+```
+
+### `ip.sh`
+
+无需 API Token，可查询本机公网 IP 或指定 IPv4/IPv6 的 ASN、ISP、地区和时区信息：
+
+```bash
+bash ip.sh
+bash ip.sh 8.8.8.8
+bash ip.sh -6
+bash ip.sh -I eth0
+bash ip.sh --json 1.1.1.1
+```
+
 ### `tk.sh`
 
-可以指定出口网卡：
+显示出口 IP 的 ASN 号、ASN 组织、ISP 和 TikTok 地区。可以指定地址族或出口网卡：
 
 ```bash
 bash tk.sh -I eth0
+bash tk.sh -4
+bash tk.sh -6
 ```
+
+### `delete.sh` 和 `uninstall-xmr.sh`
+
+两个清理脚本默认都是仅检测模式，直接运行不会停止服务、终止进程或删除文件：
+
+```bash
+bash delete.sh --check
+bash uninstall-xmr.sh --check
+```
+
+确认预览清单后，再使用 root 权限进入清理模式。脚本会再要求输入 `REMOVE`：
+
+```bash
+sudo bash delete.sh --remove
+sudo bash uninstall-xmr.sh --remove
+sudo bash uninstall-xmr.sh --remove --home /home/<用户名>
+```
+
+`delete.sh` 只处理列明的云厂商组件，不再修改 hostname、禁用 cloud-init、删除 qemu-guest-agent 或在根目录模糊查找删除。删除前会归档已发现的文件、服务状态和 root crontab。Snap 包、已终止进程和云端注册关系不能通过该备份自动恢复。
+
+`uninstall-xmr.sh` 仅检测明确的 MoneroOcean/XMRig 目录、进程、启动项和 shell 配置。清理时会把 `moneroocean` 目录移入备份，并保留被修改文件的副本和人工恢复说明。
 
 ## 安全与风险提示
 

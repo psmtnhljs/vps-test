@@ -1,109 +1,173 @@
-#!/bin/bash
-shopt -s expand_aliases
-Font_Black="\033[30m"
-Font_Red="\033[31m"
-Font_Green="\033[32m"
-Font_Yellow="\033[33m"
-Font_Blue="\033[34m"
-Font_Purple="\033[35m"
-Font_SkyBlue="\033[36m"
-Font_White="\033[37m"
-Font_Suffix="\033[0m"
+#!/usr/bin/env bash
+# TikTok 地区与出口 ASN 检测。
 
-while getopts ":I:" optname; do
-    case "$optname" in
-    "I")
-        iface="$OPTARG"
-        useNIC="--interface $iface"
-        ;;
-    ":")
-        echo "Unknown error while processing options"
-        exit 1
-        ;;
+set -u -o pipefail
+
+readonly VERSION="2.0.0"
+readonly UA_BROWSER="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+
+INTERFACE=""
+FAMILY=""
+
+if [[ -t 1 ]]; then
+    C_RED=$'\033[31m'
+    C_GREEN=$'\033[32m'
+    C_YELLOW=$'\033[33m'
+    C_CYAN=$'\033[36m'
+    C_RESET=$'\033[0m'
+else
+    C_RED=""
+    C_GREEN=""
+    C_YELLOW=""
+    C_CYAN=""
+    C_RESET=""
+fi
+
+usage() {
+    cat <<'EOF'
+用法：bash tk.sh [-4|-6] [-I 网卡]
+
+选项：
+  -4                 使用 IPv4 出口
+  -6                 使用 IPv6 出口
+  -I, --interface    指定 curl 使用的出口网卡或地址
+  -h, --help         显示帮助
+  -V, --version      显示版本
+EOF
+}
+
+die() {
+    printf '%s错误：%s%s\n' "$C_RED" "$*" "$C_RESET" >&2
+    exit 1
+}
+
+is_valid_ip() {
+    local value="$1"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import ipaddress, sys; ipaddress.ip_address(sys.argv[1])' "$value" \
+            >/dev/null 2>&1
+    elif [[ "$value" == *:* ]]; then
+        [[ "$value" =~ ^[0-9A-Fa-f:]+$ ]]
+    else
+        [[ "$value" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
+    fi
+}
+
+json_value() {
+    local json="$1"
+    local key="$2"
+
+    if command -v jq >/dev/null 2>&1; then
+        jq -r --arg key "$key" '.[$key] // empty' <<<"$json" 2>/dev/null
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import json, sys
+try:
+    value = json.load(sys.stdin).get(sys.argv[1], "")
+    print("" if value is None else value)
+except Exception:
+    pass' "$key" <<<"$json"
+    else
+        if [[ "$key" == "asn" ]]; then
+            sed -n 's/.*"asn"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' <<<"$json" | head -n 1
+        else
+            sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p' <<<"$json" | head -n 1
+        fi
+    fi
+}
+
+mask_ip() {
+    local ip="$1"
+    if [[ "$ip" == *:* ]]; then
+        awk -F: '{printf "%s:%s:%s:*", $1, $2, $3}' <<<"$ip"
+    else
+        awk -F. '{printf "%s.%s.*.*", $1, $2}' <<<"$ip"
+    fi
+}
+
+extract_tiktok_region() {
+    grep -oE '"region"[[:space:]]*:[[:space:]]*"[A-Za-z]{2}"' \
+        | sed -n 's/.*"\([A-Za-z][A-Za-z]\)"/\U\1/p' \
+        | head -n 1
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -4) FAMILY="4" ;;
+        -6) FAMILY="6" ;;
+        -I|--interface)
+            [[ $# -ge 2 ]] || die "$1 需要网卡或地址参数"
+            INTERFACE="$2"
+            shift
+            ;;
+        -h|--help) usage; exit 0 ;;
+        -V|--version) printf 'tk.sh %s\n' "$VERSION"; exit 0 ;;
+        *) die "未知选项：$1（使用 --help 查看帮助）" ;;
     esac
+    shift
 done
 
-checkOS(){
-    ifCentOS=$(cat /etc/os-release | grep CentOS)
-    if [ -n "$ifCentOS" ];then
-        OS_Version=$(cat /etc/os-release | grep REDHAT_SUPPORT_PRODUCT_VERSION | cut -f2 -d'"')
-        if [[ "$OS_Version" -lt "8" ]];then
-            echo -e "${Font_Red}此脚本不支持CentOS${OS_Version},请升级至CentOS8或更换其他操作系统${Font_Suffix}"
-            echo -e "${Font_Red}3秒后退出脚本...${Font_Suffix}"
-            sleep 3
-            exit 1
-        fi
-    fi        
-}
-checkOS
+command -v curl >/dev/null 2>&1 || die "缺少 curl，请先安装"
 
-if [ -z "$iface" ]; then
-    useNIC=""
+CURL_ARGS=(--silent --show-error --location --connect-timeout 5 --max-time 15 --retry 1)
+[[ -n "$INTERFACE" ]] && CURL_ARGS+=(--interface "$INTERFACE")
+case "$FAMILY" in
+    4) CURL_ARGS+=(-4); IP_ENDPOINT="https://api4.ipify.org" ;;
+    6) CURL_ARGS+=(-6); IP_ENDPOINT="https://api6.ipify.org" ;;
+    *) IP_ENDPOINT="https://api64.ipify.org" ;;
+esac
+
+public_ip="$(curl "${CURL_ARGS[@]}" --fail "$IP_ENDPOINT" 2>/dev/null || true)"
+public_ip="${public_ip//$'\r'/}"
+public_ip="${public_ip//$'\n'/}"
+is_valid_ip "$public_ip" || die "无法获取公网 IP，请检查网络或出口网卡"
+
+if [[ "$FAMILY" == "4" && "$public_ip" == *:* ]]; then
+    die "当前出口未返回 IPv4 地址"
+fi
+if [[ "$FAMILY" == "6" && "$public_ip" != *:* ]]; then
+    die "当前出口未返回 IPv6 地址"
 fi
 
-if ! mktemp -u --suffix=RRC &>/dev/null; then
-    is_busybox=1
+geo_json="$(curl "${CURL_ARGS[@]}" --fail --user-agent "$UA_BROWSER" \
+    "https://api.ip.sb/geoip/${public_ip}" 2>/dev/null || true)"
+asn="$(json_value "$geo_json" asn)"
+asn_org="$(json_value "$geo_json" asn_organization)"
+organization="$(json_value "$geo_json" organization)"
+isp="$(json_value "$geo_json" isp)"
+country_code="$(json_value "$geo_json" country_code)"
+
+[[ -n "$asn_org" ]] || asn_org="$organization"
+asn_text="未知"
+if [[ -n "$asn" || -n "$asn_org" ]]; then
+    asn_text="${asn:+AS${asn}}${asn:+${asn_org:+ }}${asn_org}"
+fi
+[[ -n "$isp" ]] || isp="${organization:-未知}"
+
+if [[ -t 1 && -n "${TERM:-}" && "$TERM" != "dumb" ]]; then
+    clear
 fi
 
-UA_Browser="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.87 Safari/537.36"
+printf '%s【TikTok 地区检测】%s\n\n' "$C_CYAN" "$C_RESET"
+printf ' ** 测试时间: %s\n\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+printf ' %s** 出口 IP: %s%s\n' "$C_CYAN" "$(mask_ip "$public_ip")" "$C_RESET"
+printf ' %s** ASN: %s%s\n' "$C_CYAN" "$asn_text" "$C_RESET"
+printf ' %s** ISP: %s%s\n' "$C_CYAN" "$isp" "$C_RESET"
+[[ -n "$country_code" ]] && printf ' %s** IP 所在地: %s%s\n' "$C_CYAN" "$country_code" "$C_RESET"
+printf '%s\n\n' '******************************************'
 
-local_ipv4=$(curl $useNIC -4 -s --max-time 10 api64.ipify.org)
-local_ipv4_asterisk=$(awk -F"." '{print $1"."$2".*.*"}' <<<"${local_ipv4}")
-local_isp4=$(curl $useNIC -s -4 -A $UA_Browser --max-time 10 https://api.ip.sb/geoip/${local_ipv4} | sed -n 's/.*"organization":"\([^"]*\)".*/\1/p')
+printf ' TikTok Region:\t\t'
+tiktok_html="$(curl "${CURL_ARGS[@]}" --compressed --user-agent "$UA_BROWSER" \
+    -H 'Accept-Language: en-US,en;q=0.9' \
+    -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8' \
+    'https://www.tiktok.com/' 2>/dev/null || true)"
+region="$(extract_tiktok_region <<<"$tiktok_html")"
 
-function MediaUnlockTest_Tiktok_Region() {
-    echo -n -e " Tiktok Region:\t\t\c"
-    local Ftmpresult=$(curl $useNIC --user-agent "${UA_Browser}" -s --max-time 10 "https://www.tiktok.com/")
+if [[ -n "$region" ]]; then
+    printf '%s【%s】%s\n' "$C_GREEN" "$region" "$C_RESET"
+else
+    printf '%sFailed%s\n' "$C_RED" "$C_RESET"
+    printf ' %s未从 TikTok 页面读取到地区；可能是网络、风控或页面结构变化。%s\n' "$C_YELLOW" "$C_RESET"
+fi
 
-    if [[ "$Ftmpresult" = "curl"* ]]; then
-        echo -n -e "\r Tiktok Region:\t\t${Font_Red}Failed (Network Connection)${Font_Suffix}\n"
-        return
-    fi
-
-    local FRegion=$(echo "$Ftmpresult" | grep '"region":' | sed -n 's/.*"region":"\([^"]*\)".*/\1/p')
-    if [ -n "$FRegion" ]; then
-        echo -n -e "\r Tiktok Region:\t\t${Font_Green}【${FRegion}】${Font_Suffix}\n"
-        return
-    fi
-
-    local STmpresult=$(curl $useNIC --user-agent "${UA_Browser}" -sL --max-time 10 -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9" -H "Accept-Encoding: gzip" -H "Accept-Language: en" "https://www.tiktok.com" | gunzip 2>/dev/null)
-    local SRegion=$(echo "$STmpresult" | grep '"region":' | sed -n 's/.*"region":"\([^"]*\)".*/\1/p')
-    if [ -n "$SRegion" ]; then
-        echo -n -e "\r Tiktok Region:\t\t${Font_Yellow}【${SRegion}】(可能为IDC IP)${Font_Suffix}\n"
-        return
-    else
-        echo -n -e "\r Tiktok Region:\t\t${Font_Red}Failed${Font_Suffix}\n"
-        return
-    fi
-}
-
-function Heading() {
-    echo -e " ${Font_SkyBlue}** 您的网络为: ${local_isp4} (${local_ipv4_asterisk})${Font_Suffix} "
-    echo "******************************************"
-    echo ""
-}
-
-function Goodbye() {
-    echo ""
-    echo "******************************************"
-    echo -e "${Font_Green}检测完成${Font_Suffix}"
-    echo ""
-}
-
-clear
-
-function ScriptTitle() {
-    echo -e "${Font_SkyBlue}【Tiktok区域检测】${Font_Suffix}"
-    echo ""
-    echo -e " ** 测试时间: $(date)"
-    echo ""
-}
-ScriptTitle
-
-function RunScript() {
-    Heading
-    MediaUnlockTest_Tiktok_Region
-    Goodbye
-}
-
-RunScript
+printf '\n%s\n' '******************************************'
+printf '%s检测完成%s\n\n' "$C_GREEN" "$C_RESET"

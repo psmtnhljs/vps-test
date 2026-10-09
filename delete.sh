@@ -1,328 +1,349 @@
-#!/bin/bash
-# by spiritlhl
-# from https://github.com/spiritLHLS/one-click-installation-script
-# version: 2023.11.01
+#!/usr/bin/env bash
+# 常见云厂商代理、监控和安全组件检测/清理工具。
+# 原始版本来源：https://github.com/spiritLHLS/one-click-installation-script
 
-export DEBIAN_FRONTEND=noninteractive
-AEGIS_INSTALL_DIR="/usr/local/aegis"
-#check linux Gentoo os
-var=$(lsb_release -a | grep Gentoo)
-if [ -z "${var}" ]; then
-    var=$(cat /etc/issue | grep Gentoo)
-fi
-checkCoreos=$(cat /etc/os-release 2>/dev/null | grep coreos)
-if [ -d "/etc/runlevels/default" -a -n "${var}" ]; then
-    LINUX_RELEASE="GENTOO"
-elif [ -f "/etc/os-release" -a -n "${checkCoreos}" ]; then
-    LINUX_RELEASE="COREOS"
-    AEGIS_INSTALL_DIR="/opt/aegis"
+set -u -o pipefail
+umask 077
+
+readonly VERSION="2.0.0"
+readonly DEFAULT_BACKUP_ROOT="/var/backups/vps-test"
+
+MODE="check"
+ASSUME_YES=0
+BACKUP_ROOT="$DEFAULT_BACKUP_ROOT"
+BACKUP_ARCHIVE=""
+FOUND_CRONTAB=0
+FOUND_SNAP=0
+LIMITED_CHECK=0
+
+declare -a FOUND_PATHS=()
+declare -a FOUND_SERVICES=()
+declare -a FOUND_PROCESSES=()
+
+readonly -a CANDIDATE_PATHS=(
+    "/usr/local/qcloud"
+    "/etc/cron.d/sgagenttask"
+    "/etc/KsyunAgent"
+    "/usr/local/uniagent"
+    "/usr/local/share/jcloud"
+    "/usr/local/aegis"
+    "/opt/aegis"
+    "/usr/local/cloudmonitor"
+    "/usr/local/share/aliyun-assist"
+    "/usr/local/share/assist-daemon"
+    "/etc/init.d/aegis"
+    "/etc/init.d/agentwatch"
+    "/etc/systemd/system/aegis.service"
+    "/etc/systemd/system/aliyun.service"
+    "/etc/systemd/system/aliyun-util.service"
+    "/etc/systemd/system/agentwatch.service"
+    "/usr/sbin/aliyun_installer"
+    "/usr/sbin/aliyun-service"
+    "/usr/sbin/aliyun-service.backup"
+    "/etc/aliyun-util"
+)
+
+readonly -a CANDIDATE_SERVICES=(
+    "aegis.service"
+    "agentwatch.service"
+    "aliyun.service"
+    "aliyun-util.service"
+    "ecs_mq.service"
+    "oracle-cloud-agent.service"
+    "oracle-cloud-agent-updater.service"
+    "jcs-agent-core.service"
+    "jcs-entry.service"
+    "jcs-shutdown-scripts.service"
+    "barad_agent.service"
+    "sgagent.service"
+)
+
+readonly -a CANDIDATE_PROCESSES=(
+    "aegis_cli"
+    "aegis_client"
+    "aegis_update"
+    "aegis_quartz"
+    "AliYunDun"
+    "AliYunDunMonitor"
+    "AliYunDunUpdate"
+    "AliHids"
+    "AliHips"
+    "aliyun-service"
+    "assist_daemon"
+    "assist-daemon"
+    "agentwatch"
+    "jdog"
+    "telescoped"
+)
+
+if [[ -t 1 ]]; then
+    C_GREEN=$'\033[32m'
+    C_YELLOW=$'\033[33m'
+    C_RED=$'\033[31m'
+    C_CYAN=$'\033[36m'
+    C_RESET=$'\033[0m'
 else
-    LINUX_RELEASE="OTHER"
+    C_GREEN=""
+    C_YELLOW=""
+    C_RED=""
+    C_CYAN=""
+    C_RESET=""
 fi
 
-_red() { echo -e "\033[31m\033[01m$@\033[0m"; }
-_green() { echo -e "\033[32m\033[01m$@\033[0m"; }
-_yellow() { echo -e "\033[33m\033[01m$@\033[0m"; }
-_blue() { echo -e "\033[36m\033[01m$@\033[0m"; }
-reading() { read -rp "$(_green "$1")" "$2"; }
+info() { printf '%s[i]%s %s\n' "$C_CYAN" "$C_RESET" "$*"; }
+ok() { printf '%s[✓]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
+warn() { printf '%s[!]%s %s\n' "$C_YELLOW" "$C_RESET" "$*"; }
+die() { printf '%s[✗] %s%s\n' "$C_RED" "$*" "$C_RESET" >&2; exit 1; }
 
-uninstall_qcloud() {
-    # 腾讯云
-    /usr/local/qcloud/stargate/admin/uninstall.sh
-    /usr/local/qcloud/YunJing/uninst.sh
-    /usr/local/qcloud/monitor/barad/admin/uninstall.sh
-    rm -f /etc/cron.d/sgagenttask
-    crontab -l | grep -v '/usr/local/qcloud/stargate/admin' | crontab -
-    rm -rf /usr/local/qcloud
+usage() {
+    cat <<'EOF'
+用法：
+  bash delete.sh --check
+  sudo bash delete.sh --remove
+
+选项：
+  --check             仅检测并预览，不停止服务、不删除文件（默认）
+  --preview           与 --check 相同
+  --remove            备份可见文件后执行清理
+  --yes               与 --remove 同用时跳过 REMOVE 二次确认
+  --backup-dir DIR    指定备份目录（默认 /var/backups/vps-test）
+  -h, --help          显示帮助
+  -V, --version       显示版本
+
+可恢复边界：
+  - 检测到的文件和 root crontab 会在删除前归档。
+  - 服务启用/运行状态会记录，但不会自动恢复。
+  - Snap 包、云端注册关系和厂商控制台设置无法通过文件备份恢复。
+  - 脚本不修改 hostname，不禁用 cloud-init，不删除 qemu-guest-agent。
+EOF
 }
 
-uninstall_oralce() {
-    # 甲骨文云
-    systemctl stop oracle-cloud-agent
-    systemctl disable oracle-cloud-agent
-    systemctl stop oracle-cloud-agent-updater
-    systemctl disable oracle-cloud-agent-updater
-    systemctl disable --now qemu-guest-agent
-    if command -v snap >/dev/null 2>&1; then
-        snap remove oracle-cloud-agent
-    fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --check|--preview) MODE="check" ;;
+        --remove) MODE="remove" ;;
+        --yes) ASSUME_YES=1 ;;
+        --backup-dir)
+            [[ $# -ge 2 ]] || die "--backup-dir 需要路径"
+            BACKUP_ROOT="$2"
+            shift
+            ;;
+        -h|--help) usage; exit 0 ;;
+        -V|--version) printf 'delete.sh %s\n' "$VERSION"; exit 0 ;;
+        *) die "未知参数：$1（使用 --help 查看帮助）" ;;
+    esac
+    shift
+done
+
+[[ "$BACKUP_ROOT" == /* && "$BACKUP_ROOT" != "/" ]] \
+    || die "备份目录必须是非根目录的绝对路径"
+if ((ASSUME_YES)) && [[ "$MODE" != "remove" ]]; then
+    die "--yes 只能与 --remove 一起使用"
+fi
+
+service_exists() {
+    local service="$1"
+    command -v systemctl >/dev/null 2>&1 || return 1
+    systemctl list-unit-files --type=service --no-legend "$service" 2>/dev/null \
+        | awk '{print $1}' | grep -Fxq "$service"
 }
 
-uninstall_jdcloud() {
-    # 其他云
-    /etc/KsyunAgent/uninstall.py
-    service uma stop
-    systemctl disable --now uma
-    /usr/local/uniagent/extension/install/telescope/telescoped stop
-    # 京东云
-    systemctl stop --no-block jcs-agent-core
-    systemctl --no-reload disable jcs-agent-core
-    if command -v stop >/dev/null 2>&1; then
-        stop --no-wait jcs-agent-core /etc/init.d/jcs-agent-core
-    fi
+detect_components() {
+    local item
+    FOUND_PATHS=()
+    FOUND_SERVICES=()
+    FOUND_PROCESSES=()
+    FOUND_CRONTAB=0
+    FOUND_SNAP=0
+    LIMITED_CHECK=0
 
-    if [[ -f "/etc/centos-release" && $(grep ' 6' "/etc/centos-release") ]]; then
-        chkconfig --level 2345 expand-root off >/dev/null 2>&1
-        sysv-rc-conf --level 2345 expand-root off >/dev/null 2>&1
-        rm -rf "/usr/share/dracut/modules.d/50growroot"
-        dracut --force
-        rm -f "/usr/bin/sgdisk"
-        rm -f "/usr/bin/growpart"
-    fi
-
-    systemctl stop --no-block jcs-shutdown-scripts
-    systemctl stop --no-block jcs-entry
-    systemctl --no-reload disable jcs-shutdown-scripts
-    systemctl --no-reload disable jcs-entry
-    if command -v stop >/dev/null 2>&1; then
-        stop --no-wait jcs-shutdown-scripts
-        stop --no-wait jcs-entry
-        stop --no-wait /etc/init.d/jcs-shutdown-scripts
-        stop --no-wait /etc/init.d/jcs-entry
-    fi
-    service jcs-entry stop
-    service jcs-shutdown-scripts stop
-    chkconfig jcs-entry off >/dev/null 2>&1
-    chkconfig jcs-shutdown-scripts off >/dev/null 2>&1
-    sysv-rc-conf jcs-entry off >/dev/null 2>&1
-    sysv-rc-conf jcs-shutdown-scripts off >/dev/null 2>&1
-    update-rc.d jcs-entry remove
-    update-rc.d jcs-shutdown-scripts remove
-    pkill jdog
-    rm -rf "/usr/local/share/jcloud"
-}
-
-kill_processes() {
-    local process
-    local killall_processes=("aegis_cli" "aegis_update" "AliYunDun" "AliYunDunMonitor" "AliHids" "AliHips" "AliYunDunUpdate")
-    for process in "${killall_processes[@]}"; do
-        killall -9 "$process" >/dev/null 2>&1
-        printf "%-40s %40s\n" "Killall $process" "[  OK  ]"
+    for item in "${CANDIDATE_PATHS[@]}"; do
+        [[ -e "$item" || -L "$item" ]] && FOUND_PATHS+=("$item")
     done
-}
 
-pkill_processes() {
-    local process
-    local pkill_processes=("assist_daemon" "assist-daemon" "aliyun*" "AliYunDun*" "AliSecure*" "aegis*")
-    for process in "${pkill_processes[@]}"; do
-        pkill "$process" >/dev/null 2>&1
-        printf "%-40s %40s\n" "Pkill $process" "[  OK  ]"
+    for item in "${CANDIDATE_SERVICES[@]}"; do
+        service_exists "$item" && FOUND_SERVICES+=("$item")
     done
-    killall -9 aegis_quartz >/dev/null 2>&1
-    printf "%-40s %40s\n" "Killall aegis_quartz" "[  OK  ]"
-}
 
-uninstall_aegis() {
-    if [ -d "$AEGIS_INSTALL_DIR" ]; then
-        rm -rf "$AEGIS_INSTALL_DIR/aegis_client"
-        rm -rf "$AEGIS_INSTALL_DIR/aegis_update"
-        rm -rf "$AEGIS_INSTALL_DIR/alihids"
-    fi
-
-    if [ -d "$AEGIS_INSTALL_DIR/aegis_debug" ]; then
-        umount "$AEGIS_INSTALL_DIR/aegis_debug"
-        rm -rf "$AEGIS_INSTALL_DIR/aegis_debug"
-    fi
-
-    if [ -f "/etc/init.d/aegis" ]; then
-        /etc/init.d/aegis stop >/dev/null 2>&1
-        rm -f "/etc/init.d/aegis"
-    fi
-
-    if [ "$LINUX_RELEASE" = "GENTOO" ]; then
-        rc-update del aegis default 2>/dev/null
-        rm -f "/etc/runlevels/default/aegis" >/dev/null 2>&1
-    elif [ -f "/etc/init.d/aegis" ]; then
-        /etc/init.d/aegis uninstall
-        for ((var = 2; var <= 5; var++)); do
-            if [ -d "/etc/rc${var}.d/" ]; then
-                rm -f "/etc/rc${var}.d/S80aegis"
-            elif [ -d "/etc/rc.d/rc${var}.d" ]; then
-                rm -f "/etc/rc.d/rc${var}.d/S80aegis"
-            fi
+    if command -v pgrep >/dev/null 2>&1; then
+        for item in "${CANDIDATE_PROCESSES[@]}"; do
+            pgrep -x "$item" >/dev/null 2>&1 && FOUND_PROCESSES+=("$item")
         done
     fi
+
+    if [[ ${EUID:-$(id -u)} -eq 0 ]] && command -v crontab >/dev/null 2>&1 \
+        && crontab -l 2>/dev/null | grep -Eq '/usr/local/qcloud|aegis|aliyun|cloudmonitor'; then
+        FOUND_CRONTAB=1
+    fi
+
+    [[ ${EUID:-$(id -u)} -eq 0 ]] || LIMITED_CHECK=1
+
+    if command -v snap >/dev/null 2>&1 \
+        && snap list oracle-cloud-agent >/dev/null 2>&1; then
+        FOUND_SNAP=1
+    fi
 }
 
-wait_aegis_exit() {
-    var=1
-    limit=10
-    echo "wait aegis exit"
+found_count() {
+    printf '%s' "$((${#FOUND_PATHS[@]} + ${#FOUND_SERVICES[@]} + ${#FOUND_PROCESSES[@]} + FOUND_CRONTAB + FOUND_SNAP))"
+}
 
-    while [[ $var -lt $limit ]]; do
-        if [ -n "$(ps -ef | grep aegis_client | grep -v grep)" ]; then
-            sleep 1
-        else
-            return
+print_preview() {
+    local item
+    printf '%s云厂商组件检测结果%s\n' "$C_CYAN" "$C_RESET"
+    printf '%s\n' '----------------------------------------'
+
+    for item in "${FOUND_PATHS[@]}"; do printf '[文件] %s\n' "$item"; done
+    for item in "${FOUND_SERVICES[@]}"; do
+        printf '[服务] %s (enabled=%s, active=%s)\n' "$item" \
+            "$(systemctl is-enabled "$item" 2>/dev/null || echo unknown)" \
+            "$(systemctl is-active "$item" 2>/dev/null || echo inactive)"
+    done
+    for item in "${FOUND_PROCESSES[@]}"; do
+        printf '[进程] %s (PID: %s)\n' "$item" "$(pgrep -x "$item" 2>/dev/null | paste -sd, -)"
+    done
+    ((FOUND_CRONTAB)) && printf '[定时任务] root crontab 中的云组件条目\n'
+    ((FOUND_SNAP)) && printf '[Snap 包] oracle-cloud-agent\n'
+
+    if [[ "$(found_count)" -eq 0 ]]; then
+        printf '未发现脚本已知的云厂商代理、监控或安全组件。\n'
+    fi
+    printf '%s\n' '----------------------------------------'
+    printf '共发现 %s 项。\n' "$(found_count)"
+    ((LIMITED_CHECK)) && warn "当前为非 root 检测，无权访问的路径和 root crontab 未纳入结果"
+}
+
+validate_backup_location() {
+    local path
+    for path in "${FOUND_PATHS[@]}"; do
+        if [[ "$BACKUP_ROOT" == "$path" || "$BACKUP_ROOT" == "$path"/* ]]; then
+            die "备份目录不能位于待删除路径内：$path"
         fi
+    done
+}
 
-        ((var++))
+create_backup() {
+    local timestamp stage path relative parent service
+    timestamp="$(date +%Y%m%d_%H%M%S)"
+    mkdir -p -- "$BACKUP_ROOT"
+    stage="$(mktemp -d)"
+    BACKUP_ARCHIVE="${BACKUP_ROOT}/cloud-agents.${timestamp}.tar.gz"
+
+    mkdir -p "$stage/rootfs"
+    for path in "${FOUND_PATHS[@]}"; do
+        relative="${path#/}"
+        parent="$(dirname "$stage/rootfs/$relative")"
+        mkdir -p -- "$parent"
+        cp -a -- "$path" "$stage/rootfs/$relative" \
+            || { rm -rf -- "$stage"; die "备份失败：$path，未执行删除"; }
     done
 
-    _red "wait AliYunDun process exit fail, possibly due to self-protection, please uninstall aegis or disable self-protection from the aegis console."
+    if ((FOUND_CRONTAB)); then
+        crontab -l >"$stage/root-crontab.txt" 2>/dev/null || true
+    fi
+
+    {
+        printf '创建时间：%s\n' "$(date -Is)"
+        printf '文件：\n'
+        printf '  %s\n' "${FOUND_PATHS[@]}"
+        printf '服务：\n'
+        for service in "${FOUND_SERVICES[@]}"; do
+            printf '  %s enabled=%s active=%s\n' "$service" \
+                "$(systemctl is-enabled "$service" 2>/dev/null || echo unknown)" \
+                "$(systemctl is-active "$service" 2>/dev/null || echo inactive)"
+        done
+        printf '进程：%s\n' "${FOUND_PROCESSES[*]:-无}"
+        printf 'oracle-cloud-agent Snap：%s\n' "$FOUND_SNAP"
+    } >"$stage/manifest.txt"
+
+    cat >"$stage/RESTORE.txt" <<'EOF'
+请先把本归档解压到临时目录并检查内容。
+rootfs/ 下的文件保留了原绝对路径，可人工复制回 /。
+如需恢复 root crontab，请检查 root-crontab.txt 后手动执行 crontab root-crontab.txt。
+恢复 systemd 单元后执行 systemctl daemon-reload，并根据 manifest.txt 人工恢复启用状态。
+Snap 包、已终止的进程和云端注册状态不在自动恢复范围内。
+EOF
+
+    tar -czf "$BACKUP_ARCHIVE" -C "$stage" . \
+        || { rm -rf -- "$stage"; die "无法创建备份归档，未执行删除"; }
+    rm -rf -- "$stage"
+    ok "删除前备份已保存：$BACKUP_ARCHIVE"
 }
 
-uninstall_cloud_monitoring() {
-    # 阿里云
-    ARCH=$(arch)
-    /usr/local/cloudmonitor/CmsGoAgent.linux-${ARCH} stop
-    /usr/local/cloudmonitor/CmsGoAgent.linux-${ARCH} uninstall
-    rm -rf "/usr/local/cloudmonitor"
-
-    service aegis stop
-    update-rc.d aegis disable
-    chkconfig --del aegis >/dev/null 2>&1
-    sysv-rc-conf --del aegis >/dev/null 2>&1
-
-    /usr/local/cloudmonitor/wrapper/bin/cloudmonitor.sh stop
-    /usr/local/cloudmonitor/wrapper/bin/cloudmonitor.sh remove
-    rm -rf "/usr/local/cloudmonitor"
-
-    systemctl stop aliyun.service
-    pkill aliyun-service
-    pkill AliYunDun
-    pkill agetty
-    pkill AliYunDunUpdate
-
-    rm -rf "/etc/init.d/aegis"
-    rm -rf "/etc/init.d/agentwatch"
-    rm -rf "/etc/systemd/system/aliyun.service"
-    rm -rf "/usr/sbin/aliyun_installer"
-    rm -rf "/usr/sbin/aliyun-service"
-    rm -rf "/usr/sbin/aliyun-service.backup"
-    rm -rf "/usr/sbin/agetty"
-    rm -rf "$AEGIS_INSTALL_DIR"
-    rm -rf "/usr/local/share/aliyun-assist"
-    rm -rf "/usr/local/cloudmonitor"
+remove_crontab_entries() {
+    local temporary
+    ((FOUND_CRONTAB)) || return 0
+    temporary="$(mktemp)"
+    crontab -l 2>/dev/null \
+        | grep -Ev '/usr/local/qcloud|aegis|aliyun|cloudmonitor' >"$temporary" || true
+    crontab "$temporary"
+    rm -f -- "$temporary"
 }
 
-check_root() {
-    [ $(id -u) != "0" ] && {
-        echo "Error: You must be root to run this script"
-        exit 1
+remove_components() {
+    local item
+
+    for item in "${FOUND_SERVICES[@]}"; do
+        systemctl disable --now "$item" >/dev/null 2>&1 || warn "无法完全停止/禁用服务：$item"
+    done
+
+    for item in "${FOUND_PROCESSES[@]}"; do
+        pkill -TERM -x "$item" >/dev/null 2>&1 || true
+    done
+    sleep 1
+    for item in "${FOUND_PROCESSES[@]}"; do
+        if pgrep -x "$item" >/dev/null 2>&1; then
+            pkill -KILL -x "$item" >/dev/null 2>&1 || warn "无法终止进程：$item"
+        fi
+    done
+
+    remove_crontab_entries
+
+    if ((FOUND_SNAP)); then
+        snap remove oracle-cloud-agent || warn "无法移除 Snap 包 oracle-cloud-agent"
+    fi
+
+    for item in "${FOUND_PATHS[@]}"; do
+        rm -rf -- "$item" || warn "无法删除：$item"
+    done
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload || true
+    fi
+}
+
+main() {
+    local answer
+    if [[ "$MODE" == "remove" && ${EUID:-$(id -u)} -ne 0 ]]; then
+        die "清理模式需要 root 权限"
+    fi
+    detect_components
+    print_preview
+
+    [[ "$MODE" == "remove" ]] || {
+        info "当前是仅检测模式，没有修改系统。"
+        return 0
     }
-}
 
-remove_aegis() {
-    if [ -d $AEGIS_INSTALL_DIR ]; then
-        systemctl stop aegis.service 2>/dev/null
-        systemctl disable aegis.service 2>/dev/null
-        rm -rf "/etc/systemd/system/aegis.service"
-        umount "$AEGIS_INSTALL_DIR/aegis_debug"
-        rm -rf $AEGIS_INSTALL_DIR/* >/dev/null 2>&1
-        rm -rf /usr/local/share/assist-daemon/* >/dev/null 2>&1
-        rm -rf /usr/local/share/aliyun* >/dev/null 2>&1
-        rm -rf /sys/fs/cgroup/devices/system.slice/aegis.service >/dev/null 2>&1
+    [[ "$(found_count)" -gt 0 ]] || { ok "无需清理"; return 0; }
+    warn "清理可能使云厂商监控、远程助手、安全扫描或控制台功能失效。"
+    warn "文件备份不能自动恢复 Snap 包和云端注册关系。"
+    if ((!ASSUME_YES)); then
+        read -r -p "请确认上述清单，输入 REMOVE 继续：" answer
+        [[ "$answer" == "REMOVE" ]] || { info "已取消，未修改系统"; return 0; }
     fi
 
-    kprobeArr=(
-        "/sys/kernel/debug/tracing/instances/aegis_do_sys_open/set_event"
-        "/sys/kernel/debug/tracing/instances/aegis_inet_csk_accept/set_event"
-        "/sys/kernel/debug/tracing/instances/aegis_tcp_connect/set_event"
-        "/sys/kernel/debug/tracing/instances/aegis/set_event"
-        "/sys/kernel/debug/tracing/instances/aegis_/set_event"
-        "/sys/kernel/debug/tracing/instances/aegis_accept/set_event"
-        "/sys/kernel/debug/tracing/kprobe_events"
-        "$AEGIS_INSTALL_DIR/aegis_debug/tracing/set_event"
-        "$AEGIS_INSTALL_DIR/aegis_debug/tracing/kprobe_events"
-    )
-    for value in ${kprobeArr[@]}; do
-        if [ -f "$value" ]; then
-            echo >$value
-        fi
-    done
-
-    if [ -d "${AEGIS_INSTALL_DIR}" ]; then
-        umount ${AEGIS_INSTALL_DIR}/aegis_debug
-        if [ -d "${AEGIS_INSTALL_DIR}/cgroup/cpu" ]; then
-            umount ${AEGIS_INSTALL_DIR}/cgroup/cpu
-        fi
-        if [ -d "${AEGIS_INSTALL_DIR}/cgroup" ]; then
-            umount ${AEGIS_INSTALL_DIR}/cgroup
-        fi
-        rm -rf ${AEGIS_INSTALL_DIR}/aegis_client
-        rm -rf ${AEGIS_INSTALL_DIR}/aegis_update
-        rm -rf ${AEGIS_INSTALL_DIR}/alihids
-        rm -f ${AEGIS_INSTALL_DIR}/globalcfg/domaincfg.ini >/dev/null 2>&1
+    validate_backup_location
+    create_backup
+    remove_components
+    detect_components
+    if [[ "$(found_count)" -eq 0 ]]; then
+        ok "清理完成"
+    else
+        warn "仍有未清理项，请再次运行 --check 查看"
     fi
-    if [ -d $AEGIS_INSTALL_DIR/aegis_debug ]; then
-        if [ -d $AEGIS_INSTALL_DIR/aegis_debug/tracing/instances/aegis ]; then
-            echo >$AEGIS_INSTALL_DIR/aegis_debug/tracing/instances/aegis/set_event
-        else
-            echo >$AEGIS_INSTALL_DIR/aegis_debug/tracing/set_event
-        fi
-    fi
+    printf '备份归档：%s\n' "$BACKUP_ARCHIVE"
 }
 
-remove_agentwatch() {
-    agentwatch=$(ps aux | grep 'agentwatch')
-    if [[ -n $agentwatch ]]; then
-        systemctl stop agentwatch.service
-        systemctl disable agentwatch.service
-        cd /
-        find . -name 'agentwatch*' -type d -exec rm -rf {} \;
-        find . -name 'agentwatch*' -type f -exec rm -rf {} \;
-    fi
-}
-
-remove_all_aliyunfiles() {
-    aliyunsrv=$(ps aux | grep 'aliyun')
-    if [[ -n $aliyunsrv ]]; then
-        cd /
-        systemctl stop aliyun-util.service
-        systemctl disable aliyun-util.service
-        systemctl stop aliyun.service
-        systemctl disable aliyun.service
-
-        rm -fr /usr/sbin/aliyun-service /usr/sbin/aliyun_installer
-        rm /etc/systemd/system/aliyun-util.service
-        rm -rf /etc/aliyun-util >/dev/null 2>&1
-
-        rm -rf /etc/systemd/system/multi-user.target.wants/ecs_mq.service >/dev/null 2>&1
-        rm -rf /etc/systemd/system/multi-user.target.wants/aliyun.service >/dev/null 2>&1
-
-        find . -iname "*aliyu*" -type f -print -exec rm -rf {} \;
-        find . -iname "*aliyu*" | xargs rm -rf
-        # find . -iname "*aegis*" -type f -print -exec rm -rf {} \;
-        # find . -iname "*aegis*" | xargs rm -rf
-        find . -iname "*AliVulfix*" -type f -print -exec rm -rf {} \;
-        find . -iname "*AliVulfix*" | xargs rm -rf
-    fi
-}
-
-remove_cloud_monitor() {
-    CloudMonitorSrv=$(ps aux | grep 'cloudmonitor')
-    if [[ -n $CloudMonitorSrv ]]; then
-        cd /
-        rm -rf /usr/local/cloudmonitor
-    fi
-}
-
-rescue_localhost_name() {
-    hostname=$(cat /etc/hostname)
-    echo "" >/etc/hostname
-    echo "localhost" >/etc/hostname
-    sed -i "s/${hostname}/localhost/g" /etc/hosts
-}
-
-check_root
-touch /etc/cloud/cloud-init.disabled
-uninstall_qcloud
-uninstall_oralce
-uninstall_jdcloud
-kill_processes
-pkill_processes
-wait_aegis_exit
-uninstall_aegis
-remove_aegis
-uninstall_cloud_monitoring
-remove_aegis
-if [ -d "$AEGIS_INSTALL_DIR/aegis_debug" ]; then
-    umount "$AEGIS_INSTALL_DIR/aegis_debug"
-    rm -rf "$AEGIS_INSTALL_DIR/aegis_debug"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main
 fi
-remove_agentwatch
-remove_all_aliyunfiles
-remove_cloud_monitor
-rescue_localhost_name
-_green "Uninstallation complete, please reboot to change completely."
