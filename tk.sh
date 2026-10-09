@@ -3,11 +3,10 @@
 
 set -u -o pipefail
 
-readonly VERSION="2.0.1"
+readonly VERSION="2.0.2"
 readonly UA_BROWSER="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
 INTERFACE=""
-FAMILY=""
 
 if [[ -t 1 ]]; then
     C_RED=$'\033[31m'
@@ -25,11 +24,10 @@ fi
 
 usage() {
     cat <<'EOF'
-用法：bash tk.sh [-4|-6] [-I 网卡]
+用法：bash tk.sh [-4] [-I 网卡]
 
 选项：
-  -4                 使用 IPv4 出口
-  -6                 使用 IPv6 出口
+  -4                 使用 IPv4 出口（默认）
   -I, --interface    指定 curl 使用的出口网卡或地址
   -h, --help         显示帮助
   -V, --version      显示版本
@@ -92,8 +90,8 @@ extract_tiktok_region() {
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -4) FAMILY="4" ;;
-        -6) FAMILY="6" ;;
+        -4) ;;
+        -6) die "TikTok 地区检测仅支持 IPv4 出口" ;;
         -I|--interface)
             [[ $# -ge 2 ]] || die "$1 需要网卡或地址参数"
             INTERFACE="$2"
@@ -108,24 +106,17 @@ done
 
 command -v curl >/dev/null 2>&1 || die "缺少 curl，请先安装"
 
-CURL_ARGS=(--silent --show-error --location --connect-timeout 5 --max-time 15 --retry 1)
+CURL_ARGS=(--silent --show-error --location --connect-timeout 5 --max-time 15 --retry 1 -4)
 [[ -n "$INTERFACE" ]] && CURL_ARGS+=(--interface "$INTERFACE")
-case "$FAMILY" in
-    4) CURL_ARGS+=(-4); IP_ENDPOINT="https://api4.ipify.org" ;;
-    6) CURL_ARGS+=(-6); IP_ENDPOINT="https://api6.ipify.org" ;;
-    *) IP_ENDPOINT="https://api64.ipify.org" ;;
-esac
+IP_ENDPOINT="https://api4.ipify.org"
 
 public_ip="$(curl "${CURL_ARGS[@]}" --fail "$IP_ENDPOINT" 2>/dev/null || true)"
 public_ip="${public_ip//$'\r'/}"
 public_ip="${public_ip//$'\n'/}"
-is_valid_ip "$public_ip" || die "无法获取公网 IP，请检查网络或出口网卡"
+is_valid_ip "$public_ip" || die "无法通过 IPv4 获取公网 IP；TikTok 地区检测仅支持有 IPv4 出口的服务器"
 
-if [[ "$FAMILY" == "4" && "$public_ip" == *:* ]]; then
+if [[ "$public_ip" == *:* ]]; then
     die "当前出口未返回 IPv4 地址"
-fi
-if [[ "$FAMILY" == "6" && "$public_ip" != *:* ]]; then
-    die "当前出口未返回 IPv6 地址"
 fi
 
 geo_json="$(curl "${CURL_ARGS[@]}" --fail --user-agent "$UA_BROWSER" \

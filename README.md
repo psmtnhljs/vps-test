@@ -234,12 +234,12 @@ bash ip.sh --json 1.1.1.1
 
 ### `tk.sh`
 
-显示出口 IP 的 ASN 号、ASN 组织、ISP 和 TikTok 地区。可以指定地址族或出口网卡：
+显示出口 IP 的 ASN 号、ASN 组织、ISP 和 TikTok 地区。检测仅支持 IPv4 出口；双栈 VPS 会强制使用 IPv4。可以指定出口网卡：
 
 ```bash
+bash tk.sh
 bash tk.sh -I eth0
 bash tk.sh -4
-bash tk.sh -6
 ```
 
 ### `delete.sh` 和 `uninstall-xmr.sh`
